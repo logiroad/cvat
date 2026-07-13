@@ -25,7 +25,7 @@ import { Canvas } from 'cvat-canvas-wrapper';
 import { CombinedState } from 'reducers';
 import { createAnnotationsAsync, removeObjectAsync, rememberObject } from 'actions/annotation-actions';
 import CVATTooltip from 'components/common/cvat-tooltip';
-import { RoadSVGIcon } from 'icons';
+import { RoadSVGIcon, GoldImageSVGIcon } from 'icons';
 
 import withVisibilityHandling from '../../handle-popover-visibility';
 
@@ -40,6 +40,8 @@ export interface Props {
      */
     labelPrefix?: string;
     labelPrefixFr?: string;
+    /** Exact name of the TAG label toggled by the gold-image button. */
+    goldLabelName?: string;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -52,6 +54,7 @@ function NCPSetupTagControl(props: Props): JSX.Element {
         disabled = false,
         labelPrefix = 'Material --',
         labelPrefixFr = 'Matière --',
+        goldLabelName = 'Image Gold',
     } = props;
     const dispatch = useDispatch();
 
@@ -71,6 +74,17 @@ function NCPSetupTagControl(props: Props): JSX.Element {
                 (label.name.startsWith(labelPrefix) || label.name.startsWith(labelPrefixFr)),
         ),
         [allLabels, labelPrefix, labelPrefixFr],
+    );
+
+    // ── Gold-image label ─────────────────────────────────────────────────────
+    // The single TAG label toggled by the gold-image button. When absent the
+    // button is rendered inactive.
+    const goldLabel = useMemo(
+        () => allLabels.find(
+            (label: any) => ['any', ObjectType.TAG].includes(label.type) &&
+                label.name === goldLabelName,
+        ),
+        [allLabels, goldLabelName],
     );
 
     // ── Selected label state ─────────────────────────────────────────────────
@@ -137,15 +151,70 @@ function NCPSetupTagControl(props: Props): JSX.Element {
         createTag(label.id as number);
     }, [canAddTag, createTag]);
 
-    // ── Disabled state ───────────────────────────────────────────────────────
-    const effectivelyDisabled = disabled || satisfiedLabels.length === 0;
+    // ── Gold-image tag toggle ────────────────────────────────────────────────
+    // The gold tag currently on this frame (if any). Independent of the
+    // Material-- tags, so toggling it never touches them.
+    const goldTagState = goldLabel ?
+        frameTags.find((s: any) => s.label.id === goldLabel.id) :
+        undefined;
+    const goldApplied = !!goldTagState;
 
-    if (effectivelyDisabled) {
-        return (
+    const onToggleGold = useCallback((): void => {
+        if (!goldLabel) return;
+        if (goldTagState) {
+            dispatch(removeObjectAsync(goldTagState, true));
+            return;
+        }
+        canvasInstance.cancel();
+        dispatch(rememberObject({
+            activeObjectType: ObjectType.TAG,
+            activeLabelID: goldLabel.id as number,
+            activeShapeType: undefined,
+        }));
+        const objectState = new core.classes.ObjectState({
+            objectType: ObjectType.TAG,
+            label: goldLabel,
+            frame,
+        });
+        dispatch(createAnnotationsAsync([objectState]));
+    }, [goldLabel, goldTagState, canvasInstance, frame, dispatch]);
+
+    // ── Disabled states ──────────────────────────────────────────────────────
+    const materialDisabled = disabled || satisfiedLabels.length === 0;
+    const goldDisabled = disabled || !goldLabel;
+
+    // ── Gold-image control ───────────────────────────────────────────────────
+    // A single icon that toggles the "Image Gold" tag on click — no popover.
+    const goldControl = goldDisabled ? (
+        <CVATTooltip title='No Image Gold tag available' placement='right'>
             <Icon
-                className='cvat-ncp-setup-tag-control cvat-disabled-canvas-control'
-                component={RoadSVGIcon}
+                className='cvat-ncp-gold-image-control cvat-disabled-canvas-control'
+                component={GoldImageSVGIcon}
             />
+        </CVATTooltip>
+    ) : (
+        <CVATTooltip
+            title={goldApplied ? 'Remove Image Gold tag' : 'Add Image Gold tag'}
+            placement='right'
+        >
+            <Icon
+                className='cvat-ncp-gold-image-control'
+                component={GoldImageSVGIcon}
+                onClick={onToggleGold}
+            />
+        </CVATTooltip>
+    );
+
+    // ── Material-tag control ─────────────────────────────────────────────────
+    if (materialDisabled) {
+        return (
+            <>
+                <Icon
+                    className='cvat-ncp-setup-tag-control cvat-disabled-canvas-control'
+                    component={RoadSVGIcon}
+                />
+                {goldControl}
+            </>
         );
     }
 
@@ -188,11 +257,14 @@ function NCPSetupTagControl(props: Props): JSX.Element {
     );
 
     return (
-        <CustomPopover placement='right' content={listModeContent}>
-            <CVATTooltip title='Material tag' placement='right'>
-                <Icon className='cvat-ncp-setup-tag-control' component={RoadSVGIcon} />
-            </CVATTooltip>
-        </CustomPopover>
+        <>
+            <CustomPopover placement='right' content={listModeContent}>
+                <CVATTooltip title='Material tag' placement='right'>
+                    <Icon className='cvat-ncp-setup-tag-control' component={RoadSVGIcon} />
+                </CVATTooltip>
+            </CustomPopover>
+            {goldControl}
+        </>
     );
 }
 

@@ -83,6 +83,7 @@ import SVGIntervalToolsIcon from './assets/interval-tools-icon.svg';
 import SVGIntervalEditIcon from './assets/interval-edit-icon.svg';
 import SVGRabbitIcon from './assets/rabbit-icon.svg';
 import SVGRoadIcon from './assets/road-icon.svg';
+import SVGGoldImageIcon from './assets/gold-image-icon.svg'
 
 export const CVATIcon = React.memo((): JSX.Element => <SVGCVATIcon />);
 export const CursorIcon = React.memo((): JSX.Element => <SVGCursorIcon />);
@@ -162,3 +163,4 @@ export const IntervalToolsIcon = React.memo((): JSX.Element => <SVGIntervalTools
 export const IntervalEditIcon = React.memo((): JSX.Element => <SVGIntervalEditIcon />);
 export const RabbitSVGIcon = React.memo((): JSX.Element => <SVGRabbitIcon />);
 export const RoadSVGIcon = React.memo((): JSX.Element => <SVGRoadIcon />);
+export const GoldImageSVGIcon = React.memo((): JSX.Element => <SVGGoldImageIcon />);
