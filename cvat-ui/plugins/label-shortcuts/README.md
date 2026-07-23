@@ -18,8 +18,9 @@ projet.
    ne bougent plus jamais, même si l'ordre alphabétique change (nouveau
    label ajouté, etc.) : les nouveaux labels sont simplement ajoutés à la
    suite.
-4. Applique `SLOT_RANKS` (voir ci-dessous) pour décider quel rang alimente
-   quel raccourci clavier.
+4. Applique `DEFAULT_SLOT_RANKS`, ou la surcharge personnelle de
+   l'utilisateur connecté si elle existe (voir ci-dessous), pour décider quel
+   rang alimente quel raccourci clavier.
 5. Au clavier, reproduit le comportement natif de CVAT (relabelliser l'objet
    sélectionné si son type est compatible, ou mémoriser le label par défaut
    du prochain objet dessiné sinon).
@@ -79,21 +80,45 @@ raccourci (les autres, ex. les Tags, sont ignorés dès le calcul de l'ordre
 alphabétique). À adapter si les raccourcis doivent cibler un autre type de
 forme (polygone, rectangle...).
 
-### `SLOT_RANKS` — quel rang alphabétique va dans quel raccourci
+### `DEFAULT_SLOT_RANKS` — quel rang alphabétique va dans quel raccourci
 
 ```ts
-const SLOT_RANKS: number[] = [1, 2, 3, 4, 5, 6, 10, 11, 12, 13];
+const DEFAULT_SLOT_RANKS: number[] = [1, 2, 3, 4, 5, 6, 13, 12, 10, 11];
 ```
 
-- 1-indexé. `SLOT_RANKS[0]` = quel rang alimente le 1er raccourci de
+- 1-indexé. `DEFAULT_SLOT_RANKS[0]` = quel rang alimente le 1er raccourci de
   `SHORTCUTS`, etc. Doit avoir exactement `SHORTCUTS.length` entrées.
 - Par défaut, séquentiel (`[1, 2, ..., 10]`), mais les rangs peuvent être
-  sautés ou répétés librement : ex. `[1, 2, 3, 4, 5, 6, 11, 12, 13, 14]` fait
-  cibler les rangs 11 à 14 par les 4 derniers raccourcis, en sautant les
+  sautés, répétés ou réordonnés librement : ex. `[1, 2, 3, 4, 5, 6, 11, 12, 13, 14]`
+  fait cibler les rangs 11 à 14 par les 4 derniers raccourcis, en sautant les
   rangs 7 à 9 (qui n'ont alors aucun raccourci).
 - Si un rang demandé n'existe pas (projet avec moins de labels éligibles que
   prévu), un avertissement est affiché en console et ce raccourci reste
   inactif.
+- C'est la valeur utilisée pour tout utilisateur qui n'a pas défini de
+  configuration personnelle (voir juste en dessous).
+
+### Configuration personnelle par utilisateur (sans toucher au code)
+
+N'importe quel utilisateur CVAT connecté peut définir **sa propre**
+correspondance rang → raccourci, indépendamment de `DEFAULT_SLOT_RANKS`,
+directement depuis la console de son navigateur (F12), sans éditer ce
+fichier ni rebuilder :
+
+```js
+cvatLabelShortcuts.setSlotRanks([1, 2, 3, 4, 5, 6, 11, 12, 13, 14]) // s'applique immédiatement
+cvatLabelShortcuts.getSlotRanks()   // configuration actuellement effective (perso ou par défaut)
+cvatLabelShortcuts.resetSlotRanks() // supprime la surcharge, retour à DEFAULT_SLOT_RANKS
+```
+
+- Stocké dans le `localStorage` du navigateur, sous une clé qui inclut
+  l'ID de l'utilisateur CVAT connecté (`pluginLabelShortcutsSlotRanks:<id>`).
+  C'est donc une préférence **par compte ET par navigateur/machine** : elle
+  ne suit pas l'utilisateur s'il se connecte depuis un autre poste, il devra
+  la redéfinir une fois là-bas.
+- `setSlotRanks`/`resetSlotRanks` recalculent immédiatement le mapping actif
+  (sans recharger la page ni refaire d'appel réseau), à condition qu'un job
+  soit déjà ouvert.
 
 ## Vérifier le résultat
 
@@ -145,9 +170,11 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d cvat_ui
 ```
 
 Ces deux commandes sont nécessaires à **chaque** modification du fichier
-`index.tsx` (y compris juste changer `SLOT_RANKS` ou `SHORTCUTS`) — éditer
-la source seule ne suffit pas, le conteneur `cvat_ui` sert un bundle déjà
-compilé tant qu'il n'est pas reconstruit et redémarré.
+`index.tsx` (y compris juste changer `DEFAULT_SLOT_RANKS` ou `SHORTCUTS`) —
+éditer la source seule ne suffit pas, le conteneur `cvat_ui` sert un bundle
+déjà compilé tant qu'il n'est pas reconstruit et redémarré. La configuration
+personnelle par utilisateur (`cvatLabelShortcuts.setSlotRanks(...)`) est la
+seule exception : elle prend effet immédiatement, sans rebuild.
 
 Après déploiement, recharger la page CVAT avec un rechargement forcé
 (Ctrl+Shift+R) pour être sûr de charger le nouveau bundle.

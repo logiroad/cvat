@@ -84,12 +84,49 @@ const ELIGIBLE_LABEL_TYPES = new Set<LabelType>([LabelType.MASK, LabelType.ANY])
 
 // Which alphabetical rank (1-based, among ELIGIBLE_LABEL_TYPES labels, in the
 // stable order resolveLabelOrder maintains - see below) feeds each shortcut
-// slot. Defaults to 1..SHORTCUTS.length (sequential), but ranks can be
-// skipped or repeated freely: e.g. [1, 2, 3, 4, 5, 6, 11, 12, 13, 14] makes
-// the first 6 shortcuts target ranks 1-6 as usual, and the last 4 jump to
-// ranks 11-14, leaving 7-10 with no shortcut at all. Must have exactly
-// SHORTCUTS.length entries.
-const SLOT_RANKS: number[] = [1, 2, 3, 4, 5, 6, 10, 11, 12, 13];
+// slot, when the signed-in user has no personal override (see further down).
+// Sequential (1..SHORTCUTS.length) by default, but ranks can be skipped or
+// repeated freely: e.g. [1, 2, 3, 4, 5, 6, 11, 12, 13, 14] makes the first 6
+// shortcuts target ranks 1-6 as usual, and the last 4 jump to ranks 11-14,
+// leaving 7-10 with no shortcut at all. Must have exactly SHORTCUTS.length
+// entries.
+const DEFAULT_SLOT_RANKS: number[] = [1, 2, 3, 4, 5, 6, 13, 12, 10, 11];
+
+// Every signed-in CVAT user can override DEFAULT_SLOT_RANKS with their own
+// mapping, persisted in THIS browser's localStorage under their user ID (so
+// it does not follow them to a different browser/machine, and does not
+// require editing this file or rebuilding). From the browser console, on
+// the CVAT tab, run:
+//   cvatLabelShortcuts.setSlotRanks([1, 2, 3, 4, 5, 6, 11, 12, 13, 14])
+//   cvatLabelShortcuts.getSlotRanks()     // currently effective ranks
+//   cvatLabelShortcuts.resetSlotRanks()   // back to DEFAULT_SLOT_RANKS
+const SLOT_RANKS_STORAGE_PREFIX = 'pluginLabelShortcutsSlotRanks';
+
+function isValidSlotRanks(value: unknown): value is number[] {
+    return Array.isArray(value) && value.length > 0 && value.every((rank) => Number.isInteger(rank) && rank > 0);
+}
+
+function readUserSlotRanksOverride(userId: number): number[] | null {
+    try {
+        const raw = JSON.parse(localStorage.getItem(`${SLOT_RANKS_STORAGE_PREFIX}:${userId}`) || 'null');
+        return isValidSlotRanks(raw) ? raw : null;
+    } catch (_error: unknown) {
+        return null;
+    }
+}
+
+function writeUserSlotRanksOverride(userId: number, ranks: number[]): void {
+    localStorage.setItem(`${SLOT_RANKS_STORAGE_PREFIX}:${userId}`, JSON.stringify(ranks));
+}
+
+function clearUserSlotRanksOverride(userId: number): void {
+    localStorage.removeItem(`${SLOT_RANKS_STORAGE_PREFIX}:${userId}`);
+}
+
+function effectiveSlotRanks(userId: number | null): number[] {
+    if (userId === null) return DEFAULT_SLOT_RANKS;
+    return readUserSlotRanksOverride(userId) || DEFAULT_SLOT_RANKS;
+}
 
 type Shortcut = (typeof SHORTCUTS)[number];
 
@@ -174,16 +211,16 @@ function resolveLabelOrder(projectId: number, projectLabels: Label[]): Label[] {
     return ordered;
 }
 
-// Applies SLOT_RANKS on top of the full rank-ordered label list, warning
-// about ranks that don't exist (project has fewer eligible labels than
-// requested) so a typo in SLOT_RANKS doesn't fail silently.
-function applySlotRanks(projectId: number, rankedLabels: Label[]): Label[] {
-    return SLOT_RANKS.map((rank, slotIndex) => {
+// Applies the given slot ranks on top of the full rank-ordered label list,
+// warning about ranks that don't exist (project has fewer eligible labels
+// than requested) so a typo in a SLOT_RANKS override doesn't fail silently.
+function applySlotRanks(projectId: number, rankedLabels: Label[], slotRanks: number[]): Label[] {
+    return slotRanks.map((rank, slotIndex) => {
         const label = rankedLabels[rank - 1];
         if (!label) {
             // eslint-disable-next-line no-console
             console.warn(
-                `[label-shortcuts] Project ${projectId}: SLOT_RANKS[${slotIndex}] asks for rank ${rank}, ` +
+                `[label-shortcuts] Project ${projectId}: slot rank [${slotIndex}] asks for rank ${rank}, ` +
                 `but only ${rankedLabels.length} eligible label(s) exist - that shortcut stays unassigned.`,
             );
         }
@@ -248,10 +285,29 @@ function applyLabel(
     }
 }
 
-// Tracks the last project we already computed shortcuts for, so switching
-// jobs within the same project is a no-op.
+// Tracks the last project we already fetched labels for, so switching jobs
+// within the same project doesn't refetch. rankedLabels is cached alongside
+// it so a personal SLOT_RANKS override (see cvatLabelShortcuts below) can be
+// re-applied instantly, without a network round-trip.
 let lastHandledProjectId: number | null = null;
+let lastRankedLabels: Label[] = [];
 let currentOrderedLabels: (Label | undefined)[] = [];
+
+function logCurrentMapping(projectId: number): void {
+    // eslint-disable-next-line no-console
+    console.info(
+        `[label-shortcuts] Project ${projectId}: `,
+        currentOrderedLabels
+            .map((label, index) => (label ? `${formatShortcut(SHORTCUTS[index])} -> "${label.name}"` : null))
+            .filter(Boolean)
+            .join(', '),
+    );
+}
+
+function recomputeCurrentOrderedLabels(projectId: number, userId: number | null): void {
+    currentOrderedLabels = applySlotRanks(projectId, lastRankedLabels, effectiveSlotRanks(userId));
+    logCurrentMapping(projectId);
+}
 
 const builder: ComponentBuilder = ({ dispatch, store, core }) => {
     const handleKeydown = (event: KeyboardEvent): void => {
@@ -266,11 +322,46 @@ const builder: ComponentBuilder = ({ dispatch, store, core }) => {
 
     window.addEventListener('keydown', handleKeydown);
 
+    // Exposed console API so each signed-in user can personalize SLOT_RANKS
+    // from their own browser, without editing this file or rebuilding -
+    // see the comment on SLOT_RANKS_STORAGE_PREFIX above for usage.
+    (window as any).cvatLabelShortcuts = {
+        setSlotRanks(ranks: number[]): void {
+            const userId = store.getState().auth.user?.id ?? null;
+            if (userId === null) {
+                // eslint-disable-next-line no-console
+                console.error('[label-shortcuts] No signed-in user - cannot save a personal SLOT_RANKS override.');
+                return;
+            }
+            if (!isValidSlotRanks(ranks)) {
+                // eslint-disable-next-line no-console
+                console.error('[label-shortcuts] Invalid ranks - expected a non-empty array of positive integers.');
+                return;
+            }
+            writeUserSlotRanksOverride(userId, ranks);
+            // eslint-disable-next-line no-console
+            console.info(`[label-shortcuts] Personal SLOT_RANKS saved for user ${userId}.`);
+            if (lastHandledProjectId !== null) recomputeCurrentOrderedLabels(lastHandledProjectId, userId);
+        },
+        getSlotRanks(): number[] {
+            return effectiveSlotRanks(store.getState().auth.user?.id ?? null);
+        },
+        resetSlotRanks(): void {
+            const userId = store.getState().auth.user?.id ?? null;
+            if (userId === null) return;
+            clearUserSlotRanksOverride(userId);
+            // eslint-disable-next-line no-console
+            console.info(`[label-shortcuts] Personal SLOT_RANKS override removed for user ${userId}.`);
+            if (lastHandledProjectId !== null) recomputeCurrentOrderedLabels(lastHandledProjectId, userId);
+        },
+    };
+
     return {
         name: 'Label shortcuts (alphabetical, per project)',
         destructor: () => {
             window.removeEventListener('keydown', handleKeydown);
             lastHandledProjectId = null;
+            lastRankedLabels = [];
             currentOrderedLabels = [];
         },
         globalStateDidUpdate: () => {
@@ -289,19 +380,9 @@ const builder: ComponentBuilder = ({ dispatch, store, core }) => {
             core.projects.get({ id: projectId }).then(([project]) => {
                 if (!project || lastHandledProjectId !== projectId) return;
                 const eligibleLabels = project.labels.filter((label) => ELIGIBLE_LABEL_TYPES.has(label.type));
-                const rankedLabels = resolveLabelOrder(projectId, eligibleLabels);
-                currentOrderedLabels = applySlotRanks(projectId, rankedLabels);
-
-                // eslint-disable-next-line no-console
-                console.info(
-                    `[label-shortcuts] Project ${projectId}: `,
-                    currentOrderedLabels
-                        .map((label, index) => (
-                            label ? `${formatShortcut(SHORTCUTS[index])} -> "${label.name}"` : null
-                        ))
-                        .filter(Boolean)
-                        .join(', '),
-                );
+                lastRankedLabels = resolveLabelOrder(projectId, eligibleLabels);
+                const userId = store.getState().auth.user?.id ?? null;
+                recomputeCurrentOrderedLabels(projectId, userId);
             }).catch((error: unknown) => {
                 // eslint-disable-next-line no-console
                 console.error('[label-shortcuts] Failed to load project labels', error);
