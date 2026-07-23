@@ -1,8 +1,4 @@
-// Copyright (C) CVAT.ai Corporation
-//
-// SPDX-License-Identifier: MIT
-
-import { ComponentBuilder, ComponentBuilderArgs, PluginEntryPoint } from 'components/plugins-entrypoint';
+import { ComponentBuilder, PluginEntryPoint } from 'components/plugins-entrypoint';
 import { setNavigationType } from 'actions/annotation-actions';
 import { NavigationType } from 'reducers';
 import { Job, ObjectType } from 'cvat-core-wrapper';
@@ -33,7 +29,7 @@ type SearchFn = (frameFrom: number, frameTo: number, searchParameters: SearchPar
 // navigation buttons) with a version that walks frames one by one and skips
 // any frame already carrying the auto_validated tag - a condition the native
 // JsonLogic filter engine cannot express (see comment above).
-function patchSearch(jobInstance: Job, store: ComponentBuilderArgs['store']): void {
+function patchSearch(jobInstance: Job): void {
     const { annotations } = jobInstance;
     const originalSearch: SearchFn = annotations.search.bind(annotations);
 
@@ -62,7 +58,6 @@ function patchSearch(jobInstance: Job, store: ComponentBuilderArgs['store']): vo
 
         let candidate = await jobInstance.frames.search(searchFilters, frameFrom, frameTo);
         while (candidate !== null) {
-            // eslint-disable-next-line no-await-in-loop
             const states = await annotations.get(candidate, false, []);
             const alreadyValidated = states.some(
                 (state) => state.objectType === ObjectType.TAG && state.label?.name === AUTO_VALIDATED_TAG_LABEL,
@@ -76,7 +71,6 @@ function patchSearch(jobInstance: Job, store: ComponentBuilderArgs['store']): vo
                 break;
             }
 
-            // eslint-disable-next-line no-await-in-loop
             candidate = await jobInstance.frames.search(searchFilters, next, frameTo);
         }
 
@@ -107,7 +101,7 @@ const builder: ComponentBuilder = ({ dispatch, store }) => ({
         }
 
         lastHandledJobID = jobInstance.id;
-        patchSearch(jobInstance, store);
+        patchSearch(jobInstance);
         dispatch(setNavigationType(NavigationType.FILTERED));
     },
 });
