@@ -52,20 +52,32 @@ function patchSearch(jobInstance: Job, store: ComponentBuilderArgs['store']): vo
         const predicate = sign > 0 ? (frame: number) => frame <= frameTo : (frame: number) => frame >= frameTo;
         const step = sign > 0 ? 1 : -1;
 
-        for (let frame = frameFrom; predicate(frame); frame += step) {
-            const { deletedFrames } = store.getState().annotation.job.meta ?? { deletedFrames: {} };
-            if (!allowDeletedFrames && deletedFrames?.[frame]) {
-                continue;
-            }
+        // Only ever consider frames that actually belong to the job. jobInstance.frames.search
+        // (findFrame in cvat-core) walks the range but skips out-of-job placeholder positions -
+        // present in simple ground-truth jobs with sparse meta.includedFrames - as well as
+        // deleted frames. Iterating raw integers here would return such placeholders (whose
+        // annotations.get yields no states, so they look "unvalidated"), and changeFrameAsync
+        // cannot load a frame that is not part of the job, stalling navigation.
+        const searchFilters = { offset: 1, notDeleted: !allowDeletedFrames };
 
+        let candidate = await jobInstance.frames.search(searchFilters, frameFrom, frameTo);
+        while (candidate !== null) {
             // eslint-disable-next-line no-await-in-loop
-            const states = await annotations.get(frame, false, []);
+            const states = await annotations.get(candidate, false, []);
             const alreadyValidated = states.some(
                 (state) => state.objectType === ObjectType.TAG && state.label?.name === AUTO_VALIDATED_TAG_LABEL,
             );
             if (!alreadyValidated) {
-                return frame;
+                return candidate;
             }
+
+            const next = candidate + step;
+            if (!predicate(next)) {
+                break;
+            }
+
+            // eslint-disable-next-line no-await-in-loop
+            candidate = await jobInstance.frames.search(searchFilters, next, frameTo);
         }
 
         return null;
