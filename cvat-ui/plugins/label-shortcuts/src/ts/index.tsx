@@ -5,10 +5,16 @@
 import {
     ComponentBuilder, ComponentBuilderArgs, PluginEntryPoint,
 } from 'components/plugins-entrypoint';
-import { rememberObject, updateAnnotationsAsync } from 'actions/annotation-actions';
+import {
+    changeFrameAsync, rememberObject, removeObjectAsync, repeatDrawShapeAsync,
+    searchAnnotationsAsync, searchChaptersAsync, switchPlay, updateAnnotationsAsync,
+} from 'actions/annotation-actions';
 import {
     Label, LabelType, ObjectType, ShapeType,
 } from 'cvat-core-wrapper';
+import { ActiveControl, NavigationType } from 'reducers';
+import isAbleToChangeFrame from 'utils/is-able-to-change-frame';
+import { Canvas, CanvasMode } from 'cvat-canvas-wrapper';
 
 // Assigns a keyboard shortcut to every label of the current project, based on
 // its rank in alphabetical order (see resolveLabelOrder below for how the
@@ -285,6 +291,185 @@ function applyLabel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Extra, unrelated to label shortcuts: make the numeric keypad's "+" key
+// behave like "n" (CVAT's native "Draw mode" shortcut, standard 2D workspace
+// only).
+//
+// Root cause (confirmed by reading node_modules/mousetrap/mousetrap.js):
+// CVAT's shared GlobalHotKeys component (utils/mousetrap-react.tsx) always
+// binds shortcuts with action:'keydown'. Mousetrap's own _getKeyInfo has a
+// _SHIFT_MAP that, for any *:'keydown'* binding (not 'keypress'), silently
+// rewrites the key '+' to '=' plus a required 'shift' modifier - i.e. it
+// assumes "+" can only ever come from Shift+Equal (true on a QWERTY top row,
+// false for the numpad's dedicated "+" key, which involves no Shift and no
+// "=" at all). So adding "+" as a sequence to "Draw mode" in Settings >
+// Shortcuts appears to work (it's saved, shown in the field, survives a
+// reload) but can never actually fire from the numpad. This can't be fixed
+// from a plugin - it lives in CVAT's shared keybinding component and in the
+// mousetrap npm package - so instead we bypass Mousetrap entirely for this
+// one key.
+//
+// There are actually two different native "n" behaviors, chosen by
+// controls-side-bar.tsx (containers/.../controls-side-bar.tsx:94-104) based
+// on state.settings.workspace.showPrivateAttributes:
+//   - showPrivateAttributes === true  -> "Gold" / standard mode:
+//     handleDrawMode(event, 'draw') from controls-side-bar.tsx.
+//   - showPrivateAttributes === false -> "Rabbit" / NCP mode:
+//     ncp-controls-side-bar.tsx's own SWITCH_DRAW_MODE_STANDARD_CONTROLS
+//     handler, which also treats ActiveControl.RABBIT as "currently
+//     drawing", and when idle dispatches a `ncp:open-rabbit` window
+//     CustomEvent (opening the rabbit class-picker popover) instead of
+//     calling repeatDrawShapeAsync.
+// Both are replicated below against the canvas/Redux state directly.
+function triggerDrawMode(store: ComponentBuilderArgs['store'], dispatch: ComponentBuilderArgs['dispatch']): void {
+    const state = store.getState();
+    const { instance: canvasInstance, activeControl } = state.annotation.canvas;
+    if (!(canvasInstance instanceof Canvas)) return;
+    const rabbitMode = !state.settings.workspace.showPrivateAttributes;
+
+    const drawingControls = [
+        ActiveControl.DRAW_POINTS,
+        ActiveControl.DRAW_POLYGON,
+        ActiveControl.DRAW_POLYLINE,
+        ActiveControl.DRAW_RECTANGLE,
+        ActiveControl.DRAW_CUBOID,
+        ActiveControl.DRAW_ELLIPSE,
+        ActiveControl.DRAW_SKELETON,
+        ActiveControl.DRAW_MASK,
+        ActiveControl.AI_TOOLS,
+        ActiveControl.OPENCV_TOOLS,
+        ...(rabbitMode ? [ActiveControl.RABBIT] : []),
+    ];
+    const drawing = drawingControls.includes(activeControl);
+    const editing = canvasInstance.mode() === CanvasMode.EDIT;
+
+    if (rabbitMode && !drawing && !editing) {
+        window.dispatchEvent(new CustomEvent('ncp:open-rabbit'));
+        return;
+    }
+
+    if (!drawing) {
+        if (editing) {
+            // users probably will press N (or here, +) expecting to finish editing
+            canvasInstance.edit({ enabled: false });
+            return;
+        }
+        canvasInstance.cancel();
+        // repeatDrawShapeAsync reads the latest draw parameters from Redux
+        // state itself and calls canvasInstance.draw() with them.
+        dispatch(repeatDrawShapeAsync());
+    } else if ([ActiveControl.AI_TOOLS, ActiveControl.OPENCV_TOOLS].includes(activeControl)) {
+        canvasInstance.interact({ enabled: false });
+    } else {
+        canvasInstance.draw({ enabled: false });
+    }
+}
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Extra: make the numeric keypad's "-" key behave like "Delete" (CVAT's
+// native "Delete object" shortcut, DELETE_OBJECT_STANDARD_WORKSPACE,
+// objects-list.tsx). Numpad "-" doesn't hit the same _SHIFT_MAP rewrite as
+// "+" (there is no bare '-' entry in Mousetrap's _SHIFT_MAP, only '_'), so
+// adding it through Settings > Shortcuts does work - this is here anyway so
+// both keys are handled the same, consistent way, without depending on a
+// per-browser Settings edit that "Restore Defaults" would wipe out. Shift+
+// Numpad "-" forces deletion of locked objects, mirroring "shift+del".
+//
+// Note: objects-list.tsx's native handler dispatches the PLAIN removeObject
+// action (just sets state.annotation.remove), relying on a separately
+// mounted <RemoveConfirmComponent> to notice that state and then dispatch
+// the real removeObjectAsync (immediately, unless the object is locked or a
+// track and force is false, in which case it shows a confirmation dialog
+// first). Depending on that separate component reacting to our dispatch
+// proved unreliable, so this calls removeObjectAsync directly instead -
+// objectState.delete() (cvat-core) already refuses to delete a locked
+// object when force is false, so the safety behavior is preserved; the only
+// difference is the "are you sure, this is a track" dialog is skipped.
+function triggerDeleteActivatedObject(
+    store: ComponentBuilderArgs['store'],
+    dispatch: ComponentBuilderArgs['dispatch'],
+    force: boolean,
+): void {
+    const state = store.getState();
+    const { activatedStateID, states } = state.annotation.annotations;
+    // eslint-disable-next-line no-console
+    console.info('[label-shortcuts] delete: activatedStateID =', activatedStateID, 'states.length =', states.length);
+    if (!Number.isInteger(activatedStateID)) {
+        // eslint-disable-next-line no-console
+        console.warn('[label-shortcuts] delete: no activated object, nothing to delete');
+        return;
+    }
+    const activatedState = states.find((_state) => _state.clientID === activatedStateID);
+    if (!activatedState) {
+        // eslint-disable-next-line no-console
+        console.warn('[label-shortcuts] delete: activatedStateID set but no matching state found in states[]');
+        return;
+    }
+    // eslint-disable-next-line no-console
+    console.info('[label-shortcuts] delete: dispatching removeObjectAsync for', activatedState.objectType, 'force =', force);
+    dispatch(removeObjectAsync(activatedState, force));
+}
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Extra: make the numeric keypad's "/" and "*" keys behave like "d" and "f"
+// (CVAT's native Previous/Next frame shortcuts, PREV_FRAME/NEXT_FRAME,
+// player-buttons.tsx). Chosen because the numpad's top row (NumLock, /, *, -)
+// is present on essentially every keyboard with a numpad (built-in on any
+// 102+-key keyboard, or an external USB numpad) - "/" sits left of "*",
+// matching backward/forward.
+//
+// "d"/"f" are plain letters, not present in Mousetrap's _SHIFT_MAP, so they
+// don't have the "+" bug - but this still bypasses Mousetrap and replicates
+// onPrevFrame/onNextFrame (containers/annotation-page/top-bar/top-bar.tsx)
+// directly, for the same reason "-" needed capture+stopPropagation: "/" is
+// already a native alternate sequence for "Switch occluded" (objects-list.tsx,
+// sequences: ['q', '/']) in the objects sidebar scope, and would otherwise
+// fire alongside our navigation.
+//
+// This mirrors the exact logic of onPrevFrame/onNextFrame, including
+// respecting the current navigationType (Regular/Filtered/Chapter/Empty) -
+// notably, when skip-auto-validated has set FILTERED navigation, this calls
+// the same searchAnnotationsAsync -> jobInstance.annotations.search that
+// plugin patches, so "/" and "*" correctly skip auto_validated frames too.
+async function triggerFrameNavigation(
+    store: ComponentBuilderArgs['store'],
+    dispatch: ComponentBuilderArgs['dispatch'],
+    direction: 'next' | 'prev',
+): Promise<void> {
+    const state = store.getState();
+    const jobInstance = state.annotation.job.instance;
+    if (!jobInstance) return;
+
+    const { number: frameNumber } = state.annotation.player.frame;
+    const { playing, navigationType } = state.annotation.player;
+    const { showDeletedFrames } = state.settings.player;
+    const { startFrame, stopFrame } = jobInstance;
+
+    const frameFrom = direction === 'next' ?
+        Math.min(stopFrame, frameNumber + 1) :
+        Math.max(startFrame, frameNumber - 1);
+    const boundary = direction === 'next' ? stopFrame : startFrame;
+
+    const newFrame = await jobInstance.frames.search({ notDeleted: !showDeletedFrames }, frameFrom, boundary);
+    if (newFrame === null || newFrame === frameNumber || !isAbleToChangeFrame(newFrame)) return;
+
+    if (playing) dispatch(switchPlay(false));
+
+    if (navigationType === NavigationType.REGULAR) {
+        dispatch(changeFrameAsync(newFrame));
+    } else if (navigationType === NavigationType.FILTERED) {
+        dispatch(searchAnnotationsAsync(jobInstance, newFrame, boundary));
+    } else if (navigationType === NavigationType.CHAPTER) {
+        dispatch(searchChaptersAsync(jobInstance, newFrame, boundary));
+    } else {
+        dispatch(searchAnnotationsAsync(jobInstance, newFrame, boundary, { isEmptyFrame: true }));
+    }
+}
+// ---------------------------------------------------------------------------
+
 // Tracks the last project we already fetched labels for, so switching jobs
 // within the same project doesn't refetch. rankedLabels is cached alongside
 // it so a personal SLOT_RANKS override (see cvatLabelShortcuts below) can be
@@ -310,17 +495,58 @@ function recomputeCurrentOrderedLabels(projectId: number, userId: number | null)
 }
 
 const builder: ComponentBuilder = ({ dispatch, store, core }) => {
+    // Registered with {capture: true} and, below, explicit stopPropagation()
+    // calls: CVAT's native shortcuts (Mousetrap, bound on `document`) run in
+    // the bubble phase and call stopPropagation() themselves once a sequence
+    // matches. Both Numpad "-" (natively "Move to background", TO_BACKGROUND,
+    // default sequences ['-', '_']) and the digit keys used for label
+    // shortcuts could otherwise be silently swallowed before ever reaching a
+    // plain bubble-phase listener on `window` (this is what was happening to
+    // "-": it was actually triggering "Move to background", not doing
+    // nothing). Listening on the capture phase runs BEFORE Mousetrap sees the
+    // event at all, and stopping propagation ourselves prevents the native
+    // handler from also firing afterwards for the keys we've taken over.
     const handleKeydown = (event: KeyboardEvent): void => {
         if (isEditableTarget(event.target)) return;
+
+        if (event.code === 'NumpadAdd' && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            triggerDrawMode(store, dispatch);
+            return;
+        }
+
+        if (event.code === 'NumpadSubtract' && !event.ctrlKey && !event.altKey && !event.metaKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            triggerDeleteActivatedObject(store, dispatch, event.shiftKey);
+            return;
+        }
+
+        if (event.code === 'NumpadDivide' && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            triggerFrameNavigation(store, dispatch, 'prev');
+            return;
+        }
+
+        if (event.code === 'NumpadMultiply' && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            triggerFrameNavigation(store, dispatch, 'next');
+            return;
+        }
+
         const index = findShortcutIndex(event);
         if (index === -1) return;
         const label = currentOrderedLabels[index];
         if (!label) return;
         event.preventDefault();
+        event.stopPropagation();
         applyLabel(store, dispatch, label);
     };
 
-    window.addEventListener('keydown', handleKeydown);
+    window.addEventListener('keydown', handleKeydown, { capture: true });
 
     // Exposed console API so each signed-in user can personalize SLOT_RANKS
     // from their own browser, without editing this file or rebuilding -
@@ -359,7 +585,7 @@ const builder: ComponentBuilder = ({ dispatch, store, core }) => {
     return {
         name: 'Label shortcuts (alphabetical, per project)',
         destructor: () => {
-            window.removeEventListener('keydown', handleKeydown);
+            window.removeEventListener('keydown', handleKeydown, { capture: true });
             lastHandledProjectId = null;
             lastRankedLabels = [];
             currentOrderedLabels = [];

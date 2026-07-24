@@ -24,10 +24,24 @@ projet.
 5. Au clavier, reproduit le comportement natif de CVAT (relabelliser l'objet
    sélectionné si son type est compatible, ou mémoriser le label par défaut
    du prochain objet dessiné sinon).
+6. En plus des chiffres, prend aussi en charge 4 touches fixes du pavé
+   numérique pour le dessin, la suppression et la navigation — voir
+   [Touches fixes](#touches-fixes-non-configurables--dessin-suppression-navigation)
+   ci-dessous.
 
 Ces raccourcis restent actifs en changeant de job dans le même projet (rien
 n'est recalculé), et sont retrouvés automatiquement en revenant plus tard sur
 un projet déjà visité (relu depuis le `localStorage`).
+
+## Exemple : pavé numérique entièrement personnalisé
+
+![Exemple de correspondance pavé numérique](./pavé_numérique_V2.png)
+
+Cet exemple (spécifique à un projet d'inspection de chaussée) combine les 4
+touches fixes ci-dessous (`/` `*` `-` `+`) avec une configuration personnelle
+de `DEFAULT_SLOT_RANKS`/`cvatLabelShortcuts.setSlotRanks(...)` pour les
+chiffres 1 à 9 et 0. Les libellés de labels et le regroupement par couleur
+sont propres à ce projet — à adapter selon les tiens.
 
 ## Configuration
 
@@ -98,27 +112,89 @@ const DEFAULT_SLOT_RANKS: number[] = [1, 2, 3, 4, 5, 6, 13, 12, 10, 11];
 - C'est la valeur utilisée pour tout utilisateur qui n'a pas défini de
   configuration personnelle (voir juste en dessous).
 
-### Configuration personnelle par utilisateur (sans toucher au code)
+### Configuration personnelle par utilisateur, depuis la console (sans toucher au code)
 
 N'importe quel utilisateur CVAT connecté peut définir **sa propre**
 correspondance rang → raccourci, indépendamment de `DEFAULT_SLOT_RANKS`,
-directement depuis la console de son navigateur (F12), sans éditer ce
-fichier ni rebuilder :
+directement depuis la console de son navigateur, sans éditer ce fichier ni
+rebuilder :
 
-```js
-cvatLabelShortcuts.setSlotRanks([1, 2, 3, 4, 5, 6, 11, 12, 13, 14]) // s'applique immédiatement
-cvatLabelShortcuts.getSlotRanks()   // configuration actuellement effective (perso ou par défaut)
-cvatLabelShortcuts.resetSlotRanks() // supprime la surcharge, retour à DEFAULT_SLOT_RANKS
-```
+1. Ouvre un job du projet à personnaliser, pour que le plugin ait déjà chargé
+   la liste des labels éligibles.
+2. Ouvre les DevTools du navigateur (F12 ou Ctrl+Shift+I) et va dans l'onglet
+   **Console**.
+3. Regarde le mapping actuel (affiché automatiquement au chargement du job,
+   ou à la demande) :
+   ```js
+   cvatLabelShortcuts.getSlotRanks()
+   ```
+   Ça retourne un tableau de rangs, ex. `[1, 2, 3, 4, 5, 6, 13, 12, 10, 11]`
+   — l'entrée à l'index 0 est ce qui alimente le raccourci `1`, l'index 1 le
+   raccourci `2`, etc. (voir le log `[label-shortcuts] Project ...` pour
+   savoir à quel **nom de label** correspond chaque rang).
+4. Définis ta propre liste de rangs (même longueur que `SHORTCUTS`, donc 10
+   valeurs par défaut) :
+   ```js
+   cvatLabelShortcuts.setSlotRanks([1, 2, 3, 4, 5, 6, 11, 12, 13, 14])
+   ```
+   Ça s'applique **immédiatement** (pas besoin de recharger la page) et
+   s'affiche dans la console pour confirmation.
+5. Pour revenir à la configuration par défaut à tout moment :
+   ```js
+   cvatLabelShortcuts.resetSlotRanks()
+   ```
 
+Détails à connaître :
+- Si un rang demandé n'existe pas (project a moins de labels éligibles que
+  prévu), un avertissement s'affiche en console et ce raccourci reste inactif
+  — comme pour `DEFAULT_SLOT_RANKS`.
 - Stocké dans le `localStorage` du navigateur, sous une clé qui inclut
   l'ID de l'utilisateur CVAT connecté (`pluginLabelShortcutsSlotRanks:<id>`).
   C'est donc une préférence **par compte ET par navigateur/machine** : elle
   ne suit pas l'utilisateur s'il se connecte depuis un autre poste, il devra
   la redéfinir une fois là-bas.
-- `setSlotRanks`/`resetSlotRanks` recalculent immédiatement le mapping actif
-  (sans recharger la page ni refaire d'appel réseau), à condition qu'un job
-  soit déjà ouvert.
+- Cette personnalisation console ne couvre que les **chiffres** (les rangs de
+  labels). Les 4 touches fixes (`/` `*` `-` `+`, voir ci-dessous) ne sont pas
+  configurables de cette façon — leur comportement est câblé dans le code du
+  plugin.
+
+## Touches fixes (non configurables) : dessin, suppression, navigation
+
+En plus des chiffres, le plugin prend en charge 4 touches supplémentaires du
+pavé numérique, câblées en dur dans `index.tsx` (pas de config `SHORTCUTS`
+pour celles-ci) :
+
+| Touche | Équivalent natif | Effet |
+|---|---|---|
+| `Numpad +` | `n` | Démarre/répète le dessin (mode standard), ou ouvre l'outil **Rabbit** en mode NCP (voir plus bas) |
+| `Numpad -` | `Delete` | Supprime l'objet sélectionné (`Shift+Numpad -` force la suppression d'un objet verrouillé) |
+| `Numpad /` | `d` | Frame précédente |
+| `Numpad *` | `f` | Frame suivante |
+
+Pourquoi ces 4 touches spécifiquement, et pourquoi en dur plutôt que via
+`SHORTCUTS`/Mousetrap :
+- `Numpad +` : le raccourci natif "Draw mode" (`n`) ne peut pas être étendu à
+  `+` via Settings → Shortcuts à cause d'un bug de la bibliothèque Mousetrap
+  (`_SHIFT_MAP` réinterprète `+` comme `Shift+Egal`, ce qui ne correspond
+  jamais à la touche `+` du pavé numérique). Voir le commentaire au-dessus de
+  `triggerDrawMode` dans `index.tsx` pour le détail complet.
+- `Numpad +` respecte aussi le mode actif : en mode "Rabbit"/NCP
+  (`state.settings.workspace.showPrivateAttributes === false`), il ouvre le
+  sélecteur Rabbit (`ncp:open-rabbit`) plutôt que la palette de dessin
+  standard — reproduisant `ncp-controls-side-bar.tsx` au lieu de
+  `controls-side-bar.tsx`.
+- `Numpad -`, `Numpad /` et `Numpad *` fonctionneraient en théorie via
+  Settings → Shortcuts (pas de bug Mousetrap pour ces touches-là), mais `-`
+  et `/` sont déjà utilisés par défaut ailleurs (`-` par "Move to
+  background", `/` par "Switch occluded") : le raccourci natif intercepterait
+  et stopperait l'événement avant qu'il n'atteigne un plugin classique. Ce
+  plugin écoute donc en **phase de capture** (avant Mousetrap) et stoppe
+  lui-même la propagation, pour prendre la main de façon fiable sur ces 4
+  touches.
+- `Numpad /` et `Numpad *` respectent le mode de navigation actif
+  (Regular/Filtered/Chapter/Empty) exactement comme `d`/`f` — donc si le
+  plugin `skip-auto-validated` a activé la navigation filtrée, ces deux
+  touches sautent aussi les frames déjà validées.
 
 ## Vérifier le résultat
 
