@@ -23,6 +23,8 @@ import OpenCVControl from '../opencv-control';
 import FitControl, { Props as FitControlProps } from '../fit-control';
 import RabbitControl from './rabbit-control';
 import NCPSetupTagControl from './road-material/ncp-setup-tag-control';
+import MaskContourControl from './mask-contour';
+import { ContourMode } from './mask-contour/mask-contour-controller';
 
 type Label = CombinedState['annotation']['job']['labels'][0];
 
@@ -68,6 +70,12 @@ const componentShortcuts = {
         sequences: ['shift+n'],
         scope: ShortcutScope.STANDARD_WORKSPACE_CONTROLS,
     },
+    TOGGLE_MASK_CONTOUR: {
+        name: 'Toggle mask contours',
+        description: 'Cycle mask rendering: normal → highlighted contour → contour only',
+        sequences: ['shift+c'],
+        scope: ShortcutScope.STANDARD_WORKSPACE_CONTROLS,
+    },
 };
 
 registerComponentShortcuts(componentShortcuts);
@@ -78,6 +86,7 @@ const ObservedOpenCVControl = ControlVisibilityObserver(OpenCVControl, 'OpenCVCo
 const ObservedFitControl = ControlVisibilityObserver<FitControlProps>(FitControl, 'FitControl');
 const ObservedRabbitControl = ControlVisibilityObserver(RabbitControl, 'RabbitControl');
 const NCPObservedSetupTagControl = ControlVisibilityObserver(NCPSetupTagControl, 'NCPSetupTagControl');
+const ObservedMaskContourControl = ControlVisibilityObserver(MaskContourControl, 'MaskContourControl');
 
 export default function NCPControlsSideBarComponent(props: Props): JSX.Element {
     const {
@@ -98,6 +107,18 @@ export default function NCPControlsSideBarComponent(props: Props): JSX.Element {
     // visible. As soon as a class is chosen the rabbit hides itself; RabbitControl
     // resets this back to null when the canvas returns to cursor (idle) mode.
     const [selectedLabelID, setSelectedLabelID] = React.useState<number | null>(null);
+
+    // ── Mask contour mode ────────────────────────────────────────────────────
+    // Cycles normal → highlighted contour → contour only. Applied to the canvas
+    // mask images by MaskContourControl / the mask-contour controller module.
+    const [contourMode, setContourMode] = React.useState<ContourMode>('none');
+    const cycleContourMode = React.useCallback((): void => {
+        setContourMode((prev) => {
+            if (prev === 'none') return 'highlight';
+            if (prev === 'highlight') return 'only';
+            return 'none';
+        });
+    }, []);
 
     // Listen to ncp:select-label events so the selected label is always kept
     // in sync at the sidebar level, regardless of which child dispatches the event.
@@ -188,6 +209,10 @@ export default function NCPControlsSideBarComponent(props: Props): JSX.Element {
             if (activeControl !== ActiveControl.CURSOR) {
                 canvasInstance.cancel();
             }
+        },
+        TOGGLE_MASK_CONTOUR: (event: KeyboardEvent | undefined) => {
+            event?.preventDefault();
+            cycleContourMode();
         },
     };
 
@@ -284,6 +309,11 @@ export default function NCPControlsSideBarComponent(props: Props): JSX.Element {
                 <ObservedRabbitControl
                     selectedLabelID={selectedLabelID}
                     setSelectedLabelID={setSelectedLabelID}
+                />
+                <ObservedMaskContourControl
+                    canvasInstance={canvasInstance}
+                    mode={contourMode}
+                    onCycle={cycleContourMode}
                 />
                 <NCPObservedSetupTagControl disabled={controlsDisabled} />
             </Layout.Sider>
