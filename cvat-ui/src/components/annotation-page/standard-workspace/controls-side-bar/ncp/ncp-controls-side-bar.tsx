@@ -147,6 +147,8 @@ export default function NCPControlsSideBarComponent(props: Props): JSX.Element {
     );
 
     const FIRST_FRAME_TAG_KEY = 'ncp-no-tag-first-frame';
+    const ROAD_MATERIAL_PREFIX = 'Material --';
+    const ROAD_MATERIAL_PREFIX_FR = 'Matière --';
 
     React.useEffect(() => {
         if (!annotationsInitialized || !frameNumbers?.length) return;
@@ -154,15 +156,17 @@ export default function NCPControlsSideBarComponent(props: Props): JSX.Element {
         const firstFrame = frameNumbers[0];
 
         if (currentFrame === firstFrame) {
-            const hasTag = annotationStates.some(
-                (s: any) => s.objectType === ObjectType.TAG,
+            const hasRoadMaterialTag = annotationStates.some(
+                (s: any) => s.objectType === ObjectType.TAG &&
+                    (s.label?.name?.startsWith(ROAD_MATERIAL_PREFIX) ||
+                    s.label?.name?.startsWith(ROAD_MATERIAL_PREFIX_FR)),
             );
-            if (!hasTag) {
+            if (!hasRoadMaterialTag) {
                 notification.warning({
                     message: 'Missing road matter tag on first frame',
                     description:
-                        'This is the first frame of the job and no tag has been set. ' +
-                        'Please add a tag annotation before continuing.',
+                        'This is the first frame of the job and no road matter tag has been set. ' +
+                        'Please add a road matter tag before continuing.',
                     duration: 0, // stays open until dismissed
                     key: FIRST_FRAME_TAG_KEY,
                 });
