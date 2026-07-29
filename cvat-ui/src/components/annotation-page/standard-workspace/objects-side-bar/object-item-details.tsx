@@ -104,8 +104,8 @@ function ItemAttributesComponent(props: Props): JSX.Element | null {
         (state: CombinedState) => state.settings.workspace.showPrivateAttributes,
     );
     const visibleAttributes = attributes.filter((attribute) => {
-        if (showPrivateAttributes){
-            return true
+        if (showPrivateAttributes) {
+            return true;
         }
         if ((attribute.values || []).includes('automatic')) {
             return false;
