@@ -2734,7 +2734,6 @@ export class CanvasViewImpl implements CanvasView, Listener {
                 }
             } else {
                 const attrNames = Object.fromEntries(state.label.attributes.map((attr) => [attr.id, attr.name]));
-        const attrByID = Object.fromEntries(state.label.attributes.map((attr) => [attr.id, attr]));
                 // check if there are updates in attributes
                 for (const attrID of Object.keys(state.attributes)) {
                     if (state.attributes[attrID] !== drawnState.attributes[+attrID]) {

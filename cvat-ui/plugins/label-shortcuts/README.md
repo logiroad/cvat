@@ -165,7 +165,7 @@ pavé numérique, câblées en dur dans `index.tsx` (pas de config `SHORTCUTS`
 pour celles-ci) :
 
 | Touche | Équivalent natif | Effet |
-|---|---|---|
+| --- | --- | --- |
 | `Numpad +` | `n` | Démarre/répète le dessin (mode standard), ou ouvre l'outil **Rabbit** en mode NCP (voir plus bas) |
 | `Numpad -` | `Delete` | Supprime l'objet sélectionné (`Shift+Numpad -` force la suppression d'un objet verrouillé) |
 | `Numpad /` | `d` | Frame précédente |
