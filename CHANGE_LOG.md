@@ -1,5 +1,6 @@
 
 # Change log
+- 17/09/2026: IA-1016, deletion of a job, task or project is refused when at least one job is not in the "new" state
 - 21/07/2026: IA-962, possibility to show only contour
 - 29/06/2026: IA-907, minor changes for UI and hotkey catching
 - 29/06/2026: added test branch and upgraded fetchstream to 2.69.0
