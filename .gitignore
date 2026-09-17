@@ -77,3 +77,6 @@ cvat-ui/dist
 **/!.yarn/releases
 **/!.yarn/sdks
 **/!.yarn/versions
+
+# Windows mark-of-the-web alternate data streams (illegal path component on NTFS)
+*:Zone.Identifier
