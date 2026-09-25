@@ -58,6 +58,11 @@ from cvat.apps.engine.cache import (
 from cvat.apps.engine.cloud_provider import Status as CloudStorageStatus
 from cvat.apps.engine.cloud_provider import db_storage_to_storage_instance
 from cvat.apps.engine.exceptions import CloudStorageMissingError
+from cvat.apps.engine.logiroad.view import (
+    check_job_is_new,
+    check_project_jobs_are_new,
+    check_task_jobs_are_new,
+)
 from cvat.apps.engine.media_extractors import get_mime, get_video_chapters
 from cvat.apps.engine.media_io.audio_provider import (
     IAudioProvider,
@@ -423,6 +428,12 @@ class ProjectViewSet(
 
         # Required for the extra summary information added in the queryset
         serializer.instance = self.get_queryset().get(pk=serializer.instance.pk)
+
+    @transaction.atomic
+    def perform_destroy(self, instance: models.Project):
+        check_project_jobs_are_new(instance)
+
+        super().perform_destroy(instance)
 
     @extend_schema(methods=["GET"], exclude=True)
     @extend_schema(
@@ -1293,6 +1304,12 @@ class TaskViewSet(
 
         # Required for the extra summary information added in the queryset
         serializer.instance = self.get_queryset().get(pk=serializer.instance.pk)
+
+    @transaction.atomic
+    def perform_destroy(self, instance: models.Task):
+        check_task_jobs_are_new(instance)
+
+        super().perform_destroy(instance)
 
     def _is_data_uploading(self) -> bool:
         return "data" in self.action
@@ -2296,6 +2313,8 @@ class JobViewSet(
     def perform_destroy(self, instance):
         if instance.type != JobType.GROUND_TRUTH:
             raise ValidationError("Only ground truth jobs can be removed")
+
+        check_job_is_new(instance)
 
         validation_layout: models.ValidationLayout | None = getattr(
             instance.segment.task.data, "validation_layout", None
