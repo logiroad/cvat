@@ -82,7 +82,6 @@ import SVGSnapToContourIcon from './assets/snap-to-contour-icon.svg';
 import SVGSnapToPointIcon from './assets/snap-to-point-icon.svg';
 import SVGLayerStackIcon from './assets/layer-stack-icon.svg';
 import SVGIntervalToolsIcon from './assets/interval-tools-icon.svg';
-import SVGIntervalEditIcon from './assets/interval-edit-icon.svg';
 import SVGRabbitIcon from './assets/rabbit-icon-squared.svg';
 import SVGRoadIcon from './assets/road-icon.svg';
 import SVGGoldImageIcon from './assets/gold-image-icon.svg';
@@ -168,7 +167,6 @@ export const SnapToContourIcon = React.memo((): JSX.Element => <SVGSnapToContour
 export const SnapToPointIcon = React.memo((): JSX.Element => <SVGSnapToPointIcon />);
 export const LayerStackIcon = React.memo((): JSX.Element => <SVGLayerStackIcon />);
 export const IntervalToolsIcon = React.memo((): JSX.Element => <SVGIntervalToolsIcon />);
-export const IntervalEditIcon = React.memo((): JSX.Element => <SVGIntervalEditIcon />);
 export const RabbitSVGIcon = React.memo((): JSX.Element => <SVGRabbitIcon />);
 export const RoadSVGIcon = React.memo((): JSX.Element => <SVGRoadIcon />);
 export const GoldImageSVGIcon = React.memo((): JSX.Element => <SVGGoldImageIcon />);
