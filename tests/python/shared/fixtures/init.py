@@ -21,15 +21,16 @@ logger = logging.getLogger(__name__)
 
 CVAT_ROOT_DIR = next(dir.parent for dir in Path(__file__).parents if dir.name == "tests")
 CVAT_DB_DIR = ASSETS_DIR / "cvat_db"
-CLICKHOUSE_INIT_SCRIPT = "components/analytics/clickhouse/init.py"
+CLICKHOUSE_INIT_SCRIPT = "/opt/cvat/components/analytics/clickhouse/init.py"
 PREFIX = "test"
 
 CONTAINER_NAME_FILES = ["docker-compose.tests.yml"]
 
 DC_FILES = CONTAINER_NAME_FILES + [
     "docker-compose.dev.yml",
+    "tests/docker-compose.static_cache.yml",
     "tests/docker-compose.file_share.yml",
-    "tests/docker-compose.minio.yml",
+    "tests/docker-compose.moto.yml",
     "tests/docker-compose.pat_settings.yml",
     "tests/docker-compose.test_servers.yml",
 ]
@@ -103,6 +104,14 @@ def pytest_addoption(parser):
         default="local",
         choices=("kube", "local"),
         help="Platform identifier - 'kube' or 'local'. (default: %(default)s)",
+    )
+
+    group._addoption(
+        "--no-coverage-collection",
+        action="store_true",
+        help=("""Don't collect the code coverage results from the containers at the end of the
+            session. The coverage statistics collection inside the containers is managed
+            by the COVERAGE_PROCESS_START env. variable separately (default: %(default)s)"""),
     )
 
 
@@ -255,6 +264,7 @@ def _get_redis_inmem_keys_to_keep():
         "rq:worker:",
         "rq:workers",
         "rq:scheduler_instance:",
+        "rq:scheduler-lock:",
         "rq:queues:",
         "cvat:applied_migrations",
         "cvat:applied_migration:",
@@ -527,6 +537,9 @@ def local_start(
         docker_exec(
             Container.DB, "psql -U root -d postgres -v from=cvat -v to=test_db -f /tmp/restore.sql"
         )
+    else:
+        # The containers might still require recreation if the environment changed
+        wait_for_services(waiting_time)
 
     if start:
         pytest.exit("All necessary containers have been created and started.", returncode=0)
@@ -573,13 +586,15 @@ def session_finish(session):
     platform = session.config.getoption("--platform")
 
     if platform == "local":
-        if os.environ.get("COVERAGE_PROCESS_START"):
+        if os.environ.get("COVERAGE_PROCESS_START") and not session.config.getoption(
+            "--no-coverage-collection"
+        ):
             collect_code_coverage_from_containers()
 
 
 def collect_code_coverage_from_containers():
     for container in Container.covered():
-        process_command = "python3"
+        process_command = "python"
 
         # find process with code coverage
         pid = docker_exec(container, f"pidof {process_command} -o 1")

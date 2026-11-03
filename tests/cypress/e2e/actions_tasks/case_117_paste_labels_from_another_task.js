@@ -82,7 +82,7 @@ context('Paste labels from one task to another.', { browser: '!firefox' }, () =>
             pasteIntoRawLabels(copiedLabels);
             cy.get('.cvat-raw-labels-viewer').invoke('val').should('not.contain', '"id":');
             cy.intercept('PATCH', '/api/tasks/**').as('patchTaskLabels');
-            cy.contains('button', 'Done').click();
+            cy.contains('button', 'Save').click();
             cy.get('.cvat-modal-confirm-remove-existing-labels').should('be.visible').within(() => {
                 cy.get('.cvat-modal-confirm-content-remove-existing-labels').should('have.text', task.labelSecond);
                 cy.get('.cvat-modal-confirm-content-remove-existing-attributes')
@@ -92,9 +92,7 @@ context('Paste labels from one task to another.', { browser: '!firefox' }, () =>
             cy.wait('@patchTaskLabels').its('response.statusCode').should('equal', 200);
             cy.get('.cvat-modal-confirm-remove-existing-labels').should('not.exist');
             cy.get('.cvat-spinner').should('not.exist');
-            cy.get('.cvat-raw-labels-viewer').then((raw) => {
-                expect(raw.text()).contain('"id":');
-            });
+            cy.get('.cvat-raw-labels-viewer').invoke('val').should('contain', '"id":');
             cy.contains('[role="tab"]', 'Constructor').click();
             cy.get('.cvat-constructor-viewer-item').should('have.length', 1);
             cy.contains('.cvat-constructor-viewer-item', task.label).should('exist');
