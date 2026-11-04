@@ -224,6 +224,9 @@ function PlayerNavigation(props: Props): JSX.Element {
                             max={stopFrame}
                             marks={marks}
                             value={frameNumber || 0}
+                            // arrow keys are handled by global frame navigation shortcuts,
+                            // a focused slider would change the frame a second time
+                            keyboard={false}
                             onChange={workspace !== Workspace.SINGLE_SHAPE ? onSliderChange : undefined}
                         />
                         {!!ranges && (
