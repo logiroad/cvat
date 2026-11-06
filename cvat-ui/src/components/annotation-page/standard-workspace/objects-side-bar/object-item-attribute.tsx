@@ -25,6 +25,7 @@ interface Props {
     attrValue: string;
     attrName: string;
     attrID: number;
+    mixed?: boolean;
     changeAttribute(attrID: number, value: string): void;
 }
 
@@ -35,6 +36,7 @@ function attrIsTheSame(prevProps: Props, nextProps: Props): boolean {
         nextProps.attrValue === prevProps.attrValue &&
         nextProps.attrName === prevProps.attrName &&
         nextProps.attrInputType === prevProps.attrInputType &&
+        nextProps.mixed === prevProps.mixed &&
         nextProps.attrValues
             .map((value: string, id: number): boolean => prevProps.attrValues[id] === value)
             .every((value: boolean): boolean => value)
@@ -44,7 +46,7 @@ function attrIsTheSame(prevProps: Props, nextProps: Props): boolean {
 function ItemAttributeComponent(props: Props): JSX.Element {
     const {
         attrInputType, attrValues, attrValue,
-        attrName, attrID, readonly, changeAttribute,
+        attrName, attrID, readonly, mixed = false, changeAttribute,
     } = props;
 
     const attrNameStyle: React.CSSProperties = { wordBreak: 'break-word', lineHeight: '1em', fontSize: 12 };
@@ -86,7 +88,8 @@ function ItemAttributeComponent(props: Props): JSX.Element {
             <Col span={24}>
                 <Checkbox
                     className='cvat-object-item-checkbox-attribute'
-                    checked={localAttrValue === 'true'}
+                    checked={!mixed && localAttrValue === 'true'}
+                    indeterminate={mixed}
                     disabled={readonly}
                     onChange={(event: CheckboxChangeEvent): void => {
                         setAttributeValue(event.target.checked ? 'true' : 'false');
@@ -112,7 +115,7 @@ function ItemAttributeComponent(props: Props): JSX.Element {
                     <Radio.Group
                         disabled={readonly}
                         size='small'
-                        value={localAttrValue}
+                        value={mixed ? undefined : localAttrValue}
                         onChange={(event: RadioChangeEvent): void => {
                             setAttributeValue(event.target.value);
                         }}
@@ -143,7 +146,8 @@ function ItemAttributeComponent(props: Props): JSX.Element {
                         onChange={(value: string): void => {
                             setAttributeValue(value);
                         }}
-                        value={localAttrValue}
+                        value={mixed ? undefined : localAttrValue}
+                        placeholder={mixed ? 'Multiple values' : undefined}
                         className='cvat-object-item-select-attribute'
                     >
                         {attrValues.map(
@@ -175,7 +179,8 @@ function ItemAttributeComponent(props: Props): JSX.Element {
                                 setAttributeValue(`${clamp(+value, min, max)}`);
                             }
                         }}
-                        value={+localAttrValue}
+                        value={mixed ? null : +localAttrValue}
+                        placeholder={mixed ? 'Multiple values' : undefined}
                         className='cvat-object-item-number-attribute'
                         min={min}
                         max={max}
@@ -255,7 +260,8 @@ function ItemAttributeComponent(props: Props): JSX.Element {
                         }
                         setAttributeValue(event.target.value);
                     }}
-                    value={localAttrValue}
+                    value={mixed ? '' : localAttrValue}
+                    placeholder={mixed ? 'Multiple values' : undefined}
                     className='cvat-object-item-text-attribute'
                 />
             </Col>

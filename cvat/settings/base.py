@@ -15,8 +15,8 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/2.0/ref/settings/
 """
 
+import ast
 import os
-import sys
 import tempfile
 import urllib
 from datetime import timedelta
@@ -32,7 +32,7 @@ from cvat import __version__
 from cvat.apps.iam.password_validation import DEFAULT_MIN_PASSWORD_LENGTH
 
 # Build paths inside the project like this: BASE_DIR / ...
-BASE_DIR = Path(__file__).parents[2]
+BASE_DIR = Path(os.environ.get("CVAT_BASE_DIR", Path(__file__).parents[2]))
 
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 INTERNAL_IPS = ["127.0.0.1"]
@@ -69,14 +69,43 @@ def generate_secret_key():
             pass
 
 
-if not SECRET_KEY:
-    sys.path.append(os.fspath(BASE_DIR))
+def load_secret_key() -> str:
+    """
+    Loads secret_key.py while avoiding code execution.
+    The keys directory has to be writable by the django user, so if the server
+    is tricked by an attacker into overwriting this file, this will at least
+    prevent the attacker from executing arbitrary code.
+    """
 
+    secret_key_path = BASE_DIR / "keys/secret_key.py"
+    module_node = ast.parse(secret_key_path.read_text(), secret_key_path)
+
+    secret_key = None
+
+    for statement_node in module_node.body:
+        error_prefix = f"{secret_key_path}:{statement_node.lineno}: "
+        match statement_node:
+            case ast.Assign(targets=[ast.Name("SECRET_KEY")]):
+                secret_key = ast.literal_eval(statement_node.value)
+                if not isinstance(secret_key, str):
+                    raise ImproperlyConfigured(error_prefix + "SECRET_KEY must be a string")
+            case _:
+                raise ImproperlyConfigured(
+                    error_prefix + "unsupported statement; only SECRET_KEY assignment is allowed"
+                )
+
+    if secret_key is None:
+        raise ImproperlyConfigured(f"{secret_key_path}: no SECRET_KEY assignment found")
+
+    return secret_key
+
+
+if not SECRET_KEY:
     try:
-        from keys.secret_key import SECRET_KEY  # pylint: disable=unused-import
-    except ModuleNotFoundError:
+        SECRET_KEY = load_secret_key()
+    except FileNotFoundError:
         generate_secret_key()
-        from keys.secret_key import SECRET_KEY
+        SECRET_KEY = load_secret_key()
 
 DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 INSTALLED_APPS = [
@@ -118,9 +147,15 @@ INSTALLED_APPS = [
     "cvat.apps.redis_handler",
     "cvat.apps.consensus",
     "cvat.apps.access_tokens",
+    "cvat.apps.growth",
 ]
 
+AUTH_USER_MODEL = "iam.User"
+
 SITE_ID = 1
+
+
+DEFAULT_DB_BULK_CREATE_BATCH_SIZE = int(os.getenv("CVAT_DEFAULT_DB_BULK_CREATE_BATCH_SIZE", 5000))
 
 
 def parse_num_proxies(value: str | None) -> int | None:
@@ -138,6 +173,8 @@ def parse_num_proxies(value: str | None) -> int | None:
     return num_proxies
 
 
+# NOTE @sosov: DRF does not have a max_page_size setting out of the box
+REST_FRAMEWORK_MAX_PAGE_SIZE = 500
 REST_FRAMEWORK = {
     "DEFAULT_PARSER_CLASSES": [
         "rest_framework.parsers.JSONParser",
@@ -265,6 +302,7 @@ OBJECTS_NOT_RELATED_WITH_ORG = [
     "server",
     "request",
     "access_token",
+    "growth",
 ]
 
 # ORG settings
@@ -279,7 +317,7 @@ AUTHENTICATION_BACKENDS = [
 
 # https://github.com/pennersr/django-allauth
 ACCOUNT_EMAIL_VERIFICATION = "none"
-ACCOUNT_AUTHENTICATION_METHOD = "username_email"
+ACCOUNT_LOGIN_METHODS = {"username", "email"}
 
 # set UI url to redirect after a successful e-mail confirmation
 # changed from '/auth/login' to '/auth/email-confirmation' for email confirmation message
@@ -318,6 +356,12 @@ REDIS_INMEM_SETTINGS = {
     "PORT": redis_inmem_port,
     "DB": REDIS_INMEM_DATABASES.RQ,
     "PASSWORD": redis_inmem_password,
+    "REDIS_CLIENT_KWARGS": {
+        # Work around an RQ < 2.0 bug where Redis socket timeouts can be too short
+        # for blocking operations such as BLPOP. Fixed upstream in RQ 2.0:
+        # https://github.com/rq/rq/pull/2120
+        "socket_timeout": None,
+    },
 }
 
 RQ_QUEUES = {
@@ -407,6 +451,13 @@ PERIODIC_RQ_JOBS = [
         "func": "cvat.apps.dataset_manager.cron.cleanup_tmp_directory",
         # Run once a day
         "cron_string": "0 18 * * *",
+    },
+    {
+        "queue": CVAT_QUEUES.CLEANING.value,
+        "id": "cron_instance_tmp_directories_cleanup",
+        "func": "cvat.apps.dataset_manager.cron.cleanup_instance_tmp_directories",
+        # Run once a day
+        "cron_string": "0 20 * * *",
     },
     {
         "queue": CVAT_QUEUES.CLEANING.value,
@@ -523,14 +574,6 @@ LOGGING = {
             "filters": [],
             "formatter": "standard",
         },
-        "server_file": {
-            "class": "logging.handlers.RotatingFileHandler",
-            "level": "DEBUG",
-            "filename": LOGS_ROOT / "cvat_server.log",
-            "formatter": "standard",
-            "maxBytes": 1024 * 1024 * 50,  # 50 MB
-            "backupCount": 5,
-        },
         "dataset_handler": {
             "class": "logging.handlers.RotatingFileHandler",
             "level": "DEBUG",
@@ -554,7 +597,7 @@ LOGGING = {
         },
     },
     "root": {
-        "handlers": ["console", "server_file"],
+        "handlers": ["console"],
     },
     "loggers": {
         "cvat": {
@@ -626,6 +669,9 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 
 CORS_EXPOSE_HEADERS = [
     "Content-Range",
+    "X-Checksum",
+    "X-Chunk-Size",
+    "X-Updated-Date",
 ]
 
 TUS_MAX_FILE_SIZE = 26843545600  # 25gb
@@ -703,6 +749,7 @@ SPECTACULAR_SETTINGS = {
         "StorageType": "cvat.apps.engine.models.StorageChoice",
         "SortingMethod": "cvat.apps.engine.models.SortingMethod",
         "WebhookType": "cvat.apps.webhooks.models.WebhookTypeChoice",
+        "AllWebhookType": "cvat.apps.webhooks.serializers.AllWebhookTypeChoice",
         "WebhookContentType": "cvat.apps.webhooks.models.WebhookContentTypeChoice",
         "RequestStatus": "cvat.apps.redis_handler.serializers.RequestStatus",
         "ValidationMode": "cvat.apps.engine.models.ValidationMode",
@@ -711,7 +758,7 @@ SPECTACULAR_SETTINGS = {
         "AnnotationConflictSeverity": "cvat.apps.quality_control.models.AnnotationConflictSeverity",
         "AnnotationConflictAnnotationType": "cvat.apps.quality_control.models.AnnotationType",
         "MismatchingAnnotationKind": "cvat.apps.quality_control.models.MismatchingAnnotationKind",
-        "QualityTargetMetric": "cvat.apps.quality_control.models.QualityTargetMetricType",
+        "QualityTargetMetric": "cvat.apps.quality_control.models.QUALITY_TARGET_METRIC_CHOICES",
         "QualityPointSizeBase": "cvat.apps.quality_control.models.PointSizeBase",
         "QualityReportTarget": "cvat.apps.quality_control.models.QualityReportTarget",
     },
@@ -722,6 +769,8 @@ SPECTACULAR_SETTINGS = {
     "SCHEMA_PATH_PREFIX": "/api",
     "SCHEMA_PATH_PREFIX_TRIM": False,
     "GENERIC_ADDITIONAL_PROPERTIES": None,
+    # https://github.com/tfranzel/drf-spectacular/issues/1543
+    "REDOC_DIST": "https://cdn.jsdelivr.net/npm/redoc@2",
 }
 
 # set similar UI restrictions
@@ -757,6 +806,10 @@ else:
 
 # Database
 # https://docs.djangoproject.com/en/3.2/ref/settings/#databases
+
+# configured in seconds.
+CVAT_DB_LOCK_TIMEOUT = int(os.getenv("CVAT_DB_LOCK_TIMEOUT", 10))
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -767,6 +820,7 @@ DATABASES = {
         "PORT": os.getenv("CVAT_POSTGRES_PORT", 5432),
         "OPTIONS": {
             "application_name": os.getenv("CVAT_POSTGRES_APPLICATION_NAME", "cvat"),
+            "options": f"-c lock_timeout={CVAT_DB_LOCK_TIMEOUT * 1000}",
         },
     }
 }
@@ -775,7 +829,6 @@ BUCKET_CONTENT_MAX_PAGE_SIZE = 500
 
 IMPORT_CACHE_FAILED_TTL = timedelta(days=30)
 IMPORT_CACHE_SUCCESS_TTL = timedelta(hours=1)
-IMPORT_CACHE_CLEAN_DELAY = timedelta(hours=12)
 
 ASSET_MAX_SIZE_MB = 10
 ASSET_SUPPORTED_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf")
@@ -790,6 +843,8 @@ SMOKESCREEN_ENABLED = to_bool(os.getenv("SMOKESCREEN_ENABLED", True))
 EMAIL_BACKEND = None
 
 ONE_RUNNING_JOB_IN_QUEUE_PER_USER = to_bool(os.getenv("ONE_RUNNING_JOB_IN_QUEUE_PER_USER", False))
+
+EMAIL_VALIDATORS = []
 
 # How many chunks can be prepared simultaneously during task creation in case the cache is not used
 CVAT_CONCURRENT_CHUNK_PROCESSING = int(os.getenv("CVAT_CONCURRENT_CHUNK_PROCESSING", 1))

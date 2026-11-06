@@ -36,7 +36,6 @@ from rq.job import JobStatus as RQJobStatus
 
 from cvat.apps.engine import models
 from cvat.apps.engine.cache_signals import cache_item_created_signal, cache_item_read_signal
-from cvat.apps.engine.cloud_provider import db_storage_to_storage_instance
 from cvat.apps.engine.log import ServerLogManager
 from cvat.apps.engine.media_extractors import (
     ImageReaderWithManifest,
@@ -46,14 +45,14 @@ from cvat.apps.engine.media_extractors import (
     ZipCompressedChunkWriter,
     load_image,
 )
-from cvat.apps.engine.model_utils import is_field_cached
-from cvat.apps.engine.rq import RQMetaWithFailureInfo
+from cvat.apps.engine.rq import RQMetaWithFailureInfo, save_job_failure_metadata
 from cvat.apps.engine.utils import (
     CvatChunkTimestampMismatchError,
     format_list,
     get_rq_lock_for_job,
     md5_hash,
 )
+from cvat.utils import django_database as db_utils
 from cvat.utils.paths import join_untrusted_path
 from utils.dataset_manifest import ImageManifestManager
 from utils.dataset_manifest.utils import Openable
@@ -92,6 +91,11 @@ def _build_chunk_job_failure_exception(
         )
 
 
+def chunk_failure_callback(rq_job, connection, exc_type, exc_value, tb):
+    # RQ runs this before publishing FAILED, so readers can reconstruct the exception.
+    save_job_failure_metadata(rq_job, exc_type, exc_value)
+
+
 def enqueue_create_chunk_job(
     queue: rq.Queue,
     rq_job_id: str,
@@ -116,6 +120,7 @@ def enqueue_create_chunk_job(
                     job_id=rq_job_id,
                     result_ttl=rq_job_result_ttl,
                     failure_ttl=rq_job_failure_ttl,
+                    on_failure=chunk_failure_callback,
                 )
     except LockError:
         raise TimeoutError(f"Cannot acquire lock for {rq_job_id}")
@@ -471,7 +476,7 @@ class MediaCache:
             set_callback,
         )
 
-        if is_field_cached(db_task, "segment_set"):
+        if db_utils.is_field_cached(db_task, "segment_set"):
             # Refresh segments to report actual dates if they were fetched previously
             # Doing so without a check leads to an error if the related object is not prefetched
             db_task.refresh_from_db(fields=["segment_set"])
@@ -665,7 +670,7 @@ class MediaCache:
 
             assert False, f"frame #{next_requested_frame_id} is missing from DB"
 
-        if storage_client := db_data.get_cloud_storage_instance():
+        if storage_client := db_data.get_cloud_storage_client():
             with ExitStack() as es:
                 tmp_dir = Path(es.enter_context(tempfile.TemporaryDirectory(prefix="cvat")))
                 # (storage filename, output filename)
@@ -754,7 +759,7 @@ class MediaCache:
                 for frame_id, frame_ris in groupby(db_related_files, key=lambda v: v[0])
             ]
 
-            if storage_client := db_data.get_cloud_storage_instance():
+            if storage_client := db_data.get_cloud_storage_client():
                 tmp_dir = Path(es.enter_context(tempfile.TemporaryDirectory(prefix="cvat")))
                 files_to_download: list[tuple[str, PurePath]] = []
                 for _, frame_media in media:
@@ -806,7 +811,7 @@ class MediaCache:
         db_data = db_task.require_data()
 
         if hasattr(db_data, "video"):
-            source_path = db_data.get_raw_data_dirname() / db_data.video.path
+            source_path = db_data.get_openable(db_data.video.path)
 
             manifest_path = db_data.get_manifest_path()
             reader = VideoReaderWithManifest(
@@ -1080,7 +1085,7 @@ class MediaCache:
         if isinstance(db_storage, int):
             db_storage = models.CloudStorage.objects.get(pk=db_storage)
 
-        storage = db_storage_to_storage_instance(db_storage)
+        storage_client = db_storage.get_client()
         if not db_storage.manifests.count():
             raise ValidationError("Cannot get the cloud storage preview. There is no manifest file")
 
@@ -1094,8 +1099,8 @@ class MediaCache:
 
             if not full_manifest_path.exists() or datetime.fromtimestamp(
                 full_manifest_path.stat().st_mtime, tz=timezone.utc
-            ) < storage.get_file_last_modified(db_manifest.filename):
-                storage.download_file(db_manifest.filename, full_manifest_path)
+            ) < storage_client.get_file_last_modified(db_manifest.filename):
+                storage_client.download_file(db_manifest.filename, full_manifest_path)
 
             manifest = ImageManifestManager(full_manifest_path, db_storage.get_storage_dirname())
             # need to update index
@@ -1113,7 +1118,7 @@ class MediaCache:
             slogger.cloud_storage[db_storage.pk].info(msg)
             raise NotFound(msg)
 
-        preview_bytes = storage.download_fileobj(preview_path)
+        preview_bytes = storage_client.download_fileobj(preview_path)
         image = PIL.Image.open(io.BytesIO(preview_bytes))
         return prepare_preview_image(image)
 
