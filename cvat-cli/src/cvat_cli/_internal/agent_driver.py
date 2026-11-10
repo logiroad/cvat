@@ -5,12 +5,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, Self, TypeVar
 
 import cvat_sdk.auto_annotation as cvataa
 import cvat_sdk.datasets as cvatds
 from cvat_sdk import Client
-from typing_extensions import Self
 
 if TYPE_CHECKING:
     from .agent import RecoverableExecutor
@@ -47,10 +46,13 @@ class CheckInCallback(Protocol):
         """
 
 
-class AgentFunctionDriver:
+SpecT = TypeVar("SpecT")
+
+
+class AgentFunctionDriver(Generic[SpecT]):
     FUNCTION_KIND: ClassVar[str]
 
-    def __init__(self, client: Client, executor: RecoverableExecutor, function_spec: object):
+    def __init__(self, client: Client, executor: RecoverableExecutor, function_spec: SpecT) -> None:
         self._client = client
         self._executor = executor
         self._function_spec = function_spec
@@ -58,6 +60,10 @@ class AgentFunctionDriver:
     @classmethod
     def init_worker(cls, state_id_generator: TrackingStateIdGenerator) -> None:
         pass
+
+    @classmethod
+    def get_remote_function_fields(cls, spec: SpecT) -> dict[str, Any]:
+        raise NotImplementedError
 
     def validate_function_compatibility(self, remote_function: dict) -> None:
         raise NotImplementedError
@@ -93,3 +99,17 @@ class AgentFunctionDriver:
             raise BadArError(f"Frame with index {frame_index} does not exist in the task")
 
         return sample, ds.labels
+
+    def _load_image_for_ar(self, sample, ar_params):
+        image = sample.media.load_image()
+
+        if roi := ar_params.get("roi"):
+            xtl, ytl, xbr, ybr = roi
+            width, height = image.size
+
+            if xbr > width or ybr > height:
+                raise BadArError("Invalid ROI")
+
+            return image.crop((xtl, ytl, xbr, ybr))
+
+        return image
