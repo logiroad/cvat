@@ -9,7 +9,6 @@ import os.path as osp
 import re
 import shutil
 import textwrap
-import traceback
 import zlib
 from abc import ABCMeta, abstractmethod
 from contextlib import suppress
@@ -21,7 +20,6 @@ from typing import Any, cast
 import django_rq
 from attr.converters import to_bool
 from django.conf import settings
-from django.contrib.auth.models import User
 from django.core.files.storage import storages
 from django.db import IntegrityError, transaction
 from django.db.models.query import Prefetch, prefetch_related_objects
@@ -39,13 +37,13 @@ from rest_framework import mixins, serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.parsers import MultiPartParser
-from rest_framework.permissions import SAFE_METHODS, IsAuthenticated
+from rest_framework.permissions import SAFE_METHODS
 from rest_framework.response import Response
 from rest_framework.settings import api_settings
 from rq.job import Job as RQJob
+from rq.job import JobStatus as RQJobStatus
 
 import cvat.apps.dataset_manager as dm
-import cvat.apps.dataset_manager.views  # pylint: disable=unused-import
 from cvat.apps.dataset_manager.serializers import DatasetFormatsSerializer
 from cvat.apps.engine import backup
 from cvat.apps.engine.background import BackupImporter, DatasetImporter, TaskCreator
@@ -56,7 +54,6 @@ from cvat.apps.engine.cache import (
     MediaCache,
 )
 from cvat.apps.engine.cloud_provider import Status as CloudStorageStatus
-from cvat.apps.engine.cloud_provider import db_storage_to_storage_instance
 from cvat.apps.engine.exceptions import CloudStorageMissingError
 from cvat.apps.engine.logiroad.view import (
     check_job_is_new,
@@ -76,7 +73,6 @@ from cvat.apps.engine.media_io.frame_provider import (
 )
 from cvat.apps.engine.media_io.media_provider import DataWithMeta, PreviewNotAvailable
 from cvat.apps.engine.mixins import BackupMixin, DatasetMixin, PartialUpdateModelMixin, UploadMixin
-from cvat.apps.engine.model_utils import bulk_create
 from cvat.apps.engine.models import (
     AnnotationGuide,
     Asset,
@@ -88,7 +84,6 @@ from cvat.apps.engine.models import (
     FrameQuality,
     Issue,
     Job,
-    JobType,
     Label,
     Location,
     Project,
@@ -112,7 +107,12 @@ from cvat.apps.engine.permissions import (
     UserPermission,
     get_iam_context,
 )
-from cvat.apps.engine.rq import ImportRequestId, ImportRQMeta, RQMetaWithFailureInfo
+from cvat.apps.engine.rq import (
+    ImportRequestId,
+    ImportRQMeta,
+    RQMetaWithFailureInfo,
+    save_job_failure_metadata,
+)
 from cvat.apps.engine.serializers import (
     AboutSerializer,
     AnnotationFileSerializer,
@@ -131,6 +131,7 @@ from cvat.apps.engine.serializers import (
     DataSerializer,
     DatasetFileSerializer,
     FileInfoSerializer,
+    GroundTruthJobCreateSerializer,
     IssueReadSerializer,
     IssueWriteSerializer,
     JobDataMetaWriteSerializer,
@@ -144,6 +145,7 @@ from cvat.apps.engine.serializers import (
     ProjectFileSerializer,
     ProjectReadSerializer,
     ProjectWriteSerializer,
+    ReplicaJobCreateSerializer,
     RqStatusSerializer,
     TaskFileSerializer,
     TaskReadSerializer,
@@ -152,6 +154,7 @@ from cvat.apps.engine.serializers import (
     TaskWriteSerializer,
     UserSerializer,
 )
+from cvat.apps.engine.task import ensure_task_is_initialized
 from cvat.apps.engine.tus import TusFile
 from cvat.apps.engine.types import ExtendedRequest
 from cvat.apps.engine.utils import parse_exception_message, sendfile
@@ -161,8 +164,9 @@ from cvat.apps.engine.view_utils import (
     tus_chunk_action,
 )
 from cvat.apps.iam.filters import ORGANIZATION_OPEN_API_PARAMETERS
-from cvat.apps.iam.permissions import IsAuthenticatedOrReadPublicResource
+from cvat.apps.iam.models import User
 from cvat.apps.redis_handler.serializers import RqIdSerializer
+from cvat.utils import django_database as db_utils
 from cvat.utils.paths import join_untrusted_path, problem_with_untrusted_path
 from utils.dataset_manifest import ImageManifestManager
 
@@ -174,6 +178,7 @@ slogger = ServerLogManager(__name__)
 _UPLOAD_PARSER_CLASSES = api_settings.DEFAULT_PARSER_CLASSES + [MultiPartParser]
 
 _DATA_CHECKSUM_HEADER_NAME = "X-Checksum"
+_DATA_CHUNK_SIZE_HEADER_NAME = "X-Chunk-Size"
 _DATA_UPDATED_DATE_HEADER_NAME = "X-Updated-Date"
 _RETRY_AFTER_TIMEOUT = 10
 
@@ -893,11 +898,12 @@ class _DataGetter(metaclass=ABCMeta):
 
     def _make_chunk_response_headers(
         self,
-        checksum: str,
+        chunk_data: DataWithMeta,
         updated_date: datetime,
     ) -> dict[str, str]:
         return {
-            _DATA_CHECKSUM_HEADER_NAME: str(checksum or ""),
+            _DATA_CHECKSUM_HEADER_NAME: self._get_chunk_checksum(chunk_data),
+            _DATA_CHUNK_SIZE_HEADER_NAME: str(len(chunk_data.data.getbuffer())),
             _DATA_UPDATED_DATE_HEADER_NAME: serializers.DateTimeField().to_representation(
                 updated_date
             ),
@@ -937,7 +943,7 @@ class _TaskDataGetter(_DataGetter):
 
     def _get_chunk_response_headers(self, chunk_data: DataWithMeta) -> dict[str, str]:
         return self._make_chunk_response_headers(
-            self._get_chunk_checksum(chunk_data),
+            chunk_data,
             self._db_task.get_chunks_updated_date(),
         )
 
@@ -1012,7 +1018,7 @@ class _JobDataGetter(_DataGetter):
 
     def _get_chunk_response_headers(self, chunk_data: DataWithMeta) -> dict[str, str]:
         return self._make_chunk_response_headers(
-            self._get_chunk_checksum(chunk_data), self._db_job.segment.chunks_updated_date
+            chunk_data, self._db_job.segment.chunks_updated_date
         )
 
 
@@ -1167,7 +1173,7 @@ class TaskViewSet(
         "dimension",
         "validation_mode",
     )
-    filter_fields = (*simple_filters, "id", "updated_date")
+    filter_fields = (*simple_filters, "id", "updated_date", "created_date")
     filter_description = textwrap.dedent("""
 
         There are few examples for complex filtering tasks:\n
@@ -1280,7 +1286,7 @@ class TaskViewSet(
         return get_410_response_for_export_api("/api/tasks/id/backup/export")
 
     @transaction.atomic
-    def perform_update(self, serializer):
+    def perform_update(self, serializer: TaskWriteSerializer) -> None:
         instance = serializer.instance
 
         super().perform_update(serializer)
@@ -1339,7 +1345,7 @@ class TaskViewSet(
     def _append_upload_info_entries(self, client_files: list[dict[str, Any]]):
         # batch version of _maybe_append_upload_info_entry() without optional insertion
         task_data = cast(Data, self._object.data)
-        bulk_create(
+        db_utils.bulk_create(
             ClientFile,
             [
                 ClientFile(file=self._prepare_upload_info_entry(cf["file"].name), data=task_data)
@@ -1619,6 +1625,14 @@ class TaskViewSet(
                 description="Data checksum, applicable for chunks only",
             ),
             OpenApiParameter(
+                _DATA_CHUNK_SIZE_HEADER_NAME,
+                location=OpenApiParameter.HEADER,
+                type=OpenApiTypes.INT,
+                required=False,
+                response=[200, 206, 416],
+                description="Decoded chunk size in bytes, applicable for chunks only",
+            ),
+            OpenApiParameter(
                 _DATA_UPDATED_DATE_HEADER_NAME,
                 location=OpenApiParameter.HEADER,
                 type=OpenApiTypes.DATETIME,
@@ -1650,17 +1664,16 @@ class TaskViewSet(
                 # other aggregations that are defined by the viewset queryset,
                 # we just need to lock 1 row with the target Task entity.
                 locked_instance = Task.objects.select_for_update().get(pk=pk)
-                task_data = locked_instance.data
-                if not task_data:
+                if locked_instance.is_initialized:
+                    raise ValidationError("Adding more data is not supported")
+
+                if not locked_instance.data_id:
                     task_data = Data.objects.create()
                     task_data.make_dirs()
                     locked_instance.data = task_data
                     self._object.data = task_data
                     locked_instance.save()
-                elif task_data.size != 0:
-                    return Response(
-                        data="Adding more data is not supported", status=status.HTTP_400_BAD_REQUEST
-                    )
+
                 return self.upload_data(request, append_url_name="append-data-chunk")
         else:
             data_type = request.query_params.get("type", None)
@@ -1820,6 +1833,8 @@ class TaskViewSet(
             return Response(data)
 
         elif request.method == "POST" or request.method == "OPTIONS":
+            ensure_task_is_initialized(task=self._object)
+
             return self.upload_data(request, append_url_name="append-annotations-chunk")
 
         elif request.method == "PUT":
@@ -1971,6 +1986,8 @@ class TaskViewSet(
         prefetch()
 
         if request.method == "PATCH":
+            ensure_task_is_initialized(task=db_task)
+
             if db_task.media_type == models.MediaType.AUDIO:
                 # TODO: introduce support for frame deletion when there's more information
                 # on use cases. Should probably work with ranges.
@@ -1981,7 +1998,7 @@ class TaskViewSet(
             db_task.data = serializer.save()
 
         db_data = db_task.data
-        if db_data is None:
+        if db_data is None or not db_task.media_type:
             raise ValidationError("Data is not uploaded for the task yet")
 
         if (
@@ -2136,13 +2153,23 @@ class TaskViewSet(
         return Response(response_serializer.data, status=status.HTTP_200_OK)
 
 
+_JOB_CREATE_SERIALIZERS = {
+    models.JobType.GROUND_TRUTH.value: GroundTruthJobCreateSerializer,
+    models.JobType.REPLICA.value: ReplicaJobCreateSerializer,
+}
+
+
 @extend_schema(tags=["jobs"])
 @extend_schema_view(
     create=extend_schema(
         summary="Create a job",
-        request=JobWriteSerializer,
+        request=PolymorphicProxySerializer(
+            component_name="JobWrite",
+            serializers=_JOB_CREATE_SERIALIZERS,
+            resource_type_field_name="type",
+        ),
         responses={
-            "201": JobReadSerializer,  # check JobWriteSerializer.to_representation
+            "201": JobReadSerializer,
         },
         examples=[
             OpenApiExample(
@@ -2194,6 +2221,14 @@ class TaskViewSet(
                     "frames": [1, 5, 10, 18],
                 },
             ),
+            OpenApiExample(
+                "create a replica job",
+                {
+                    "type": models.JobType.REPLICA,
+                    "task_id": 17,
+                    "parent_job_id": 42,
+                },
+            ),
         ],
     ),
     retrieve=extend_schema(
@@ -2221,7 +2256,7 @@ class TaskViewSet(
             Related annotations will be deleted as well.
 
             Please note, that not every job can be removed. Currently,
-            it is only available for Ground Truth jobs.
+            it is only available for Ground Truth and replica jobs.
             """),
         responses={
             "204": OpenApiResponse(description="The job has been deleted"),
@@ -2296,9 +2331,35 @@ class JobViewSet(
 
         return queryset
 
+    def filter_queryset(self, queryset):
+        # NOTE @sosov consensus_replica -> replica backward compatibility: old clients and saved
+        # filters send the legacy job type in the "type" and "filter" parameters
+        params = self.request.query_params
+        if params.get("type") == "consensus_replica" or '"consensus_replica"' in params.get(
+            "filter", ""
+        ):
+            params = params.copy()
+            if params.get("type") == "consensus_replica":
+                params["type"] = "replica"
+            if "filter" in params:
+                params["filter"] = params["filter"].replace('"consensus_replica"', '"replica"')
+            # NOTE @sosov: SimpleFilter and JsonLogicFilter read the parameters from request.query_params
+            self.request._request.GET = params
+
+        return super().filter_queryset(queryset)
+
     def get_serializer_class(self):
         if self.request.method in SAFE_METHODS:
             return JobReadSerializer
+        elif self.action == "create":
+            job_type = self.request.data.get("type")
+            if job_type is None:
+                raise ValidationError({"type": ["This field is required."]})
+
+            try:
+                return _JOB_CREATE_SERIALIZERS[job_type]
+            except (KeyError, TypeError) as ex:  # TypeError - an unhashable value, e.g. a list
+                raise ValidationError({"type": [f'"{job_type}" is not a valid choice.']}) from ex
         else:
             return JobWriteSerializer
 
@@ -2310,26 +2371,10 @@ class JobViewSet(
         serializer.instance = self.get_queryset().get(pk=serializer.instance.pk)
 
     @transaction.atomic
-    def perform_destroy(self, instance):
-        if instance.type != JobType.GROUND_TRUTH:
-            raise ValidationError("Only ground truth jobs can be removed")
-
+    def perform_destroy(self, instance: models.Job):
         check_job_is_new(instance)
 
-        validation_layout: models.ValidationLayout | None = getattr(
-            instance.segment.task.data, "validation_layout", None
-        )
-        if validation_layout and validation_layout.mode == models.ValidationMode.GT_POOL:
-            raise ValidationError(
-                'GT jobs cannot be removed when task validation mode is "{}"'.format(
-                    models.ValidationMode.GT_POOL
-                )
-            )
-
         super().perform_destroy(instance)
-
-        if validation_layout:
-            validation_layout.delete()
 
     # UploadMixin method
     def get_upload_dir(self):
@@ -2516,7 +2561,6 @@ class JobViewSet(
         self._object: models.Job = self.get_object()  # force call of check_object_permissions()
 
         if request.method == "GET":
-
             if {
                 "format",
                 "filename",
@@ -2610,6 +2654,30 @@ class JobViewSet(
                 required=False,
                 type=OpenApiTypes.INT,
                 description="A unique number value identifying chunk, starts from 0 for each job",
+            ),
+            OpenApiParameter(
+                _DATA_CHECKSUM_HEADER_NAME,
+                location=OpenApiParameter.HEADER,
+                type=OpenApiTypes.STR,
+                required=False,
+                response=[200, 206],
+                description="Data checksum, applicable for chunks only",
+            ),
+            OpenApiParameter(
+                _DATA_CHUNK_SIZE_HEADER_NAME,
+                location=OpenApiParameter.HEADER,
+                type=OpenApiTypes.INT,
+                required=False,
+                response=[200, 206, 416],
+                description="Decoded chunk size in bytes, applicable for chunks only",
+            ),
+            OpenApiParameter(
+                _DATA_UPDATED_DATE_HEADER_NAME,
+                location=OpenApiParameter.HEADER,
+                type=OpenApiTypes.DATETIME,
+                required=False,
+                response=[200, 206],
+                description="Data update date, applicable for chunks only",
             ),
         ],
         responses={
@@ -3206,7 +3274,7 @@ class LabelViewSet(
         kwargs["local"] = True
         return super().get_serializer(*args, **kwargs)
 
-    def perform_update(self, serializer):
+    def perform_update(self, serializer: LabelSerializer) -> None:
         if serializer.instance.parent is not None:
             # NOTE: this can be relaxed when skeleton updates are implemented properly
             raise ValidationError(
@@ -3217,7 +3285,7 @@ class LabelViewSet(
 
         return super().perform_update(serializer)
 
-    def perform_destroy(self, instance: models.Label):
+    def perform_destroy(self, instance: models.Label) -> None:
         if instance.parent is not None:
             # NOTE: this can be relaxed when skeleton updates are implemented properly
             raise ValidationError(
@@ -3254,6 +3322,7 @@ class LabelViewSet(
     ),
     retrieve=extend_schema(
         summary="Get user details",
+        parameters=ORGANIZATION_OPEN_API_PARAMETERS,
         responses={
             "200": PolymorphicProxySerializer(
                 component_name="MetaUser",
@@ -3292,7 +3361,9 @@ class UserViewSet(
     PartialUpdateModelMixin,
     mixins.DestroyModelMixin,
 ):
-    queryset = User.objects.prefetch_related("groups").all()
+    queryset = (
+        User.objects.select_related("profile").prefetch_related("groups", "emailaddress_set").all()
+    )
     iam_supports_organization_params = True
     iam_permission_class = UserPermission
 
@@ -3481,10 +3552,9 @@ class CloudStorageViewSet(
     )
     @action(detail=True, methods=["GET"], url_path="content-v2")
     def content_v2(self, request: ExtendedRequest, pk: int):
-        storage = None
         try:
             db_storage = self.get_object()
-            storage = db_storage_to_storage_instance(db_storage)
+            storage_client = db_storage.get_client()
             prefix = request.query_params.get("prefix", "")
             page_size = request.query_params.get(
                 "page_size", str(settings.BUCKET_CONTENT_MAX_PAGE_SIZE)
@@ -3511,8 +3581,8 @@ class CloudStorageViewSet(
 
                 if not full_manifest_path.exists() or datetime.fromtimestamp(
                     full_manifest_path.stat().st_mtime, tz=timezone.utc
-                ) < storage.get_file_last_modified(manifest_path):
-                    storage.download_file(manifest_path, full_manifest_path)
+                ) < storage_client.get_file_last_modified(manifest_path):
+                    storage_client.download_file(manifest_path, full_manifest_path)
                 manifest = ImageManifestManager(
                     full_manifest_path, db_storage.get_storage_dirname()
                 )
@@ -3528,11 +3598,11 @@ class CloudStorageViewSet(
                     page_size,
                     manifest_prefix=manifest_prefix,
                     prefix=prefix,
-                    default_prefix=storage.prefix,
+                    default_prefix=storage_client.prefix,
                     start_index=start_index,
                 )
             else:
-                content = storage.list_files_on_one_page(
+                content = storage_client.list_files_on_one_page(
                     prefix, next_token=next_token, page_size=page_size, _use_sort=True
                 )
             for i in content["content"]:
@@ -3628,8 +3698,7 @@ class CloudStorageViewSet(
     def status(self, request: ExtendedRequest, pk: int):
         try:
             db_storage = self.get_object()
-            storage = db_storage_to_storage_instance(db_storage)
-            storage_status = storage.get_status()
+            storage_status = db_storage.get_client().get_status()
             return Response(storage_status)
         except CloudStorage.DoesNotExist:
             message = f"Storage {pk} does not exist"
@@ -3651,8 +3720,7 @@ class CloudStorageViewSet(
         """
         try:
             db_storage = self.get_object()
-            storage = db_storage_to_storage_instance(db_storage)
-            actions = storage.supported_actions
+            actions = db_storage.get_client().supported_actions
             return Response(actions, content_type="text/plain")
         except CloudStorage.DoesNotExist:
             message = f"Storage {pk} does not exist"
@@ -3705,16 +3773,6 @@ class AssetsViewSet(
     def check_object_permissions(self, request: ExtendedRequest, obj):
         super().check_object_permissions(request, obj.guide)
 
-    def get_permissions(self):
-        permissions = super().get_permissions()
-
-        if self.action == "retrieve":
-            permissions = [IsAuthenticatedOrReadPublicResource()] + [
-                p for p in permissions if not isinstance(p, IsAuthenticated)
-            ]
-
-        return permissions
-
     def get_serializer_class(self):
         if self.request.method in SAFE_METHODS:
             return AssetReadSerializer
@@ -3729,7 +3787,7 @@ class AssetsViewSet(
             pk=serializer.validated_data["guide_id"]
         )
         if db_guide.assets.count() >= settings.ASSET_MAX_COUNT_PER_GUIDE:
-            raise ValidationError(f"Maximum number of assets per guide reached")
+            raise ValidationError("Maximum number of assets per guide reached")
 
         serializer.save(owner=self.request.user)
         return Response(
@@ -3902,11 +3960,16 @@ class AnnotationGuidesViewSet(
 
 
 def rq_exception_handler(rq_job: RQJob, exc_type: type[Exception], exc_value: Exception, tb):
-    rq_job_meta = RQMetaWithFailureInfo.for_job(rq_job)
-    rq_job_meta.formatted_exception = "".join(traceback.format_exception_only(exc_type, exc_value))
-    if rq_job.origin == settings.CVAT_QUEUES.CHUNKS.value:
-        rq_job_meta.exc_type = exc_type
-        rq_job_meta.exc_args = exc_value.args
-    rq_job_meta.save()
+    # NOTE @sosov: The worker has already re-queued/re-scheduled the job for another attempt
+    # that is why we can`t use redis_handler.utils.rq_job_will_be_retried there
+    if rq_job.get_status(refresh=False) in (RQJobStatus.QUEUED, RQJobStatus.SCHEDULED):
+        return True
+
+    # The global exception handlers, like this function, are called by RQ AFTER the job status is
+    # set to FAILED. In some queues (e.g. chunk and request), jobs already save failure metadata in
+    # on_failure(), which is called before RQ publishes status, so API readers can reconstruct the
+    # exception. Avoid writing it again here, only do this for jobs that have no such callback.
+    if RQMetaWithFailureInfo.for_job(rq_job).formatted_exception is None:
+        save_job_failure_metadata(rq_job, exc_type, exc_value)
 
     return True
