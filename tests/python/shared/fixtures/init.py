@@ -21,15 +21,16 @@ logger = logging.getLogger(__name__)
 
 CVAT_ROOT_DIR = next(dir.parent for dir in Path(__file__).parents if dir.name == "tests")
 CVAT_DB_DIR = ASSETS_DIR / "cvat_db"
-CLICKHOUSE_INIT_SCRIPT = "components/analytics/clickhouse/init.py"
+CLICKHOUSE_INIT_SCRIPT = "/opt/cvat/components/analytics/clickhouse/init.py"
 PREFIX = "test"
 
 CONTAINER_NAME_FILES = ["docker-compose.tests.yml"]
 
 DC_FILES = CONTAINER_NAME_FILES + [
     "docker-compose.dev.yml",
+    "tests/docker-compose.static_cache.yml",
     "tests/docker-compose.file_share.yml",
-    "tests/docker-compose.minio.yml",
+    "tests/docker-compose.moto.yml",
     "tests/docker-compose.pat_settings.yml",
     "tests/docker-compose.test_servers.yml",
 ]
@@ -255,6 +256,7 @@ def _get_redis_inmem_keys_to_keep():
         "rq:worker:",
         "rq:workers",
         "rq:scheduler_instance:",
+        "rq:scheduler-lock:",
         "rq:queues:",
         "cvat:applied_migrations",
         "cvat:applied_migration:",
@@ -579,7 +581,7 @@ def session_finish(session):
 
 def collect_code_coverage_from_containers():
     for container in Container.covered():
-        process_command = "python3"
+        process_command = "python"
 
         # find process with code coverage
         pid = docker_exec(container, f"pidof {process_command} -o 1")

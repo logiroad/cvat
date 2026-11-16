@@ -14,14 +14,14 @@ from django.conf import settings
 from django.db import transaction
 
 from cvat.apps.dataset_manager.task import TaskAnnotation
-from cvat.apps.dataset_manager.util import TmpDirManager
+from cvat.apps.dataset_manager.util import TmpDirManager, format_import_exception
 from cvat.apps.engine import models
 from cvat.apps.engine.log import DatasetLogManager
-from cvat.apps.engine.model_utils import bulk_create
 from cvat.apps.engine.rq import ImportRQMeta
 from cvat.apps.engine.serializers import DataSerializer, TaskWriteSerializer
-from cvat.apps.engine.task import create_thread as create_task
-from cvat.apps.engine.utils import av_scan_paths, transaction_with_repeatable_read
+from cvat.apps.engine.task import initialize_task
+from cvat.apps.engine.utils import av_scan_paths
+from cvat.utils import django_database as db_utils
 
 from .annotation import AnnotationIR
 from .bindings import CvatDatasetNotFoundError, CvatImportError, ProjectData, load_dataset_data
@@ -29,7 +29,7 @@ from .bindings import CvatDatasetNotFoundError, CvatImportError, ProjectData, lo
 dlogger = DatasetLogManager()
 
 
-@transaction_with_repeatable_read()
+@db_utils.transaction_with_repeatable_read()
 def export_project(
     project_id: int,
     dst_file: str,
@@ -109,7 +109,7 @@ class ProjectAnnotation:
         data["server_files_path"] = files["data_root"]
         data["stop_frame"] = None
 
-        create_task(db_task, data)
+        initialize_task(db_task=db_task, data=data)
         self.db_tasks = (
             models.Task.objects.filter(project__id=self.db_project.id)
             .exclude(data=None)
@@ -131,7 +131,7 @@ class ProjectAnnotation:
             (label,) = filter(lambda l: l.name == label_name, labels)
             attribute.label = label
         if attributes:
-            bulk_create(models.AttributeSpec, [a[1] for a in attributes])
+            db_utils.bulk_create(models.AttributeSpec, [a[1] for a in attributes])
 
     def _init_task_from_db(self, task_id: int, *, streaming: bool = False) -> None:
         annotation = TaskAnnotation(pk=task_id)
@@ -231,4 +231,4 @@ def import_dataset_as_project(src_file, project_id, format_name, conv_mask_to_po
         try:
             project.import_dataset(f, importer, conv_mask_to_poly=conv_mask_to_poly)
         except (DatasetError, DatasetImportError, DatasetNotFoundError) as ex:
-            raise CvatImportError(str(ex))
+            raise CvatImportError(format_import_exception(ex))

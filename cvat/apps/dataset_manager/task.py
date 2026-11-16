@@ -24,14 +24,18 @@ from cvat.apps.dataset_manager.bindings import (
     JobData,
     TaskData,
 )
-from cvat.apps.dataset_manager.util import TmpDirManager, faster_deepcopy
+from cvat.apps.dataset_manager.util import (
+    TmpDirManager,
+    faster_deepcopy,
+    format_import_exception,
+)
 from cvat.apps.engine import models, serializers
 from cvat.apps.engine.log import DatasetLogManager
-from cvat.apps.engine.model_utils import add_prefetch_fields, bulk_create, get_cached
 from cvat.apps.engine.plugins import plugin_decorator
-from cvat.apps.engine.utils import av_scan_paths, take_by, transaction_with_repeatable_read
+from cvat.apps.engine.utils import av_scan_paths, take_by
 from cvat.apps.events.handlers import handle_annotations_change
 from cvat.apps.profiler import silk_profile
+from cvat.utils import django_database as db_utils
 
 dlogger = DatasetLogManager()
 
@@ -152,8 +156,8 @@ def _validate_input_annotations(
                     f"Interval {interval['id']}" if interval.get("id") is not None else "Interval"
                 )
                 raise ValidationError(
-                    f"{interval_ref} cannot be outside the task boundaries"
-                    f"[{task_start}, {task_stop}], got "
+                    f"{interval_ref} start must be within [{task_start}, {task_stop}] "
+                    f"and stop must be within [{task_start}, {task_stop + 1}], got "
                     f"[{interval['start']}, {interval['stop']}]"
                 )
 
@@ -167,7 +171,7 @@ class JobAnnotation:
     ) -> QuerySet[models.Job]:
         assert issubclass(queryset.model, models.Job)
 
-        label_qs = add_prefetch_fields(
+        label_qs = db_utils.add_prefetch_fields(
             models.Label.objects.all(),
             [
                 "skeleton",
@@ -216,7 +220,7 @@ class JobAnnotation:
             if lock_job_in_db:
                 queryset = queryset.select_for_update()
 
-            self.db_job: models.Job = get_cached(queryset, pk=int(pk))
+            self.db_job: models.Job = db_utils.get_cached(queryset, pk=int(pk))
         else:
             self.db_job: models.Job = db_job
 
@@ -378,22 +382,22 @@ class JobAnnotation:
                 if elements or parent_track is None:
                     track["elements"] = elements
 
-            db_tracks = bulk_create(models.LabeledTrack, db_tracks)
+            db_tracks = db_utils.bulk_create(models.LabeledTrack, db_tracks)
 
             for db_attr_val in db_track_attr_vals:
                 db_attr_val.track_id = db_tracks[db_attr_val.track_id].id
 
-            bulk_create(models.LabeledTrackAttributeVal, db_track_attr_vals)
+            db_utils.bulk_create(models.LabeledTrackAttributeVal, db_track_attr_vals)
 
             for db_shape in db_shapes:
                 db_shape.track_id = db_tracks[db_shape.track_id].id
 
-            db_shapes = bulk_create(models.TrackedShape, db_shapes)
+            db_shapes = db_utils.bulk_create(models.TrackedShape, db_shapes)
 
             for db_attr_val in db_shape_attr_vals:
                 db_attr_val.shape_id = db_shapes[db_attr_val.shape_id].id
 
-            bulk_create(models.TrackedShapeAttributeVal, db_shape_attr_vals)
+            db_utils.bulk_create(models.TrackedShapeAttributeVal, db_shape_attr_vals)
 
             shape_idx = 0
             for track, db_track in zip(tracks, db_tracks):
@@ -435,12 +439,12 @@ class JobAnnotation:
                 if shape_elements or parent_shape is None:
                     shape["elements"] = shape_elements
 
-            db_shapes = bulk_create(models.LabeledShape, db_shapes)
+            db_shapes = db_utils.bulk_create(models.LabeledShape, db_shapes)
 
             for db_attr_val in db_attr_vals:
                 db_attr_val.shape_id = db_shapes[db_attr_val.shape_id].id
 
-            bulk_create(models.LabeledShapeAttributeVal, db_attr_vals)
+            db_utils.bulk_create(models.LabeledShapeAttributeVal, db_attr_vals)
 
             for shape, db_shape in zip(shapes, db_shapes):
                 shape["id"] = db_shape.id
@@ -471,12 +475,12 @@ class JobAnnotation:
             db_tags.append(db_tag)
             tag["attributes"] = attributes
 
-        db_tags = bulk_create(models.LabeledImage, db_tags)
+        db_tags = db_utils.bulk_create(models.LabeledImage, db_tags)
 
         for db_attr_val in db_attr_vals:
             db_attr_val.image_id = db_tags[db_attr_val.tag_id].id
 
-        bulk_create(models.LabeledImageAttributeVal, db_attr_vals)
+        db_utils.bulk_create(models.LabeledImageAttributeVal, db_attr_vals)
 
         for tag, db_tag in zip(tags, db_tags):
             tag["id"] = db_tag.id
@@ -506,12 +510,12 @@ class JobAnnotation:
                 db_intervals.append(db_interval)
                 interval["attributes"] = attributes
 
-            db_intervals = bulk_create(models.LabeledInterval, db_intervals)
+            db_intervals = db_utils.bulk_create(models.LabeledInterval, db_intervals)
 
             for db_attr_val in db_attr_vals:
                 db_attr_val.interval_id = db_intervals[db_attr_val.interval_id].id
 
-            bulk_create(models.LabeledIntervalAttributeVal, db_attr_vals)
+            db_utils.bulk_create(models.LabeledIntervalAttributeVal, db_attr_vals)
 
             for interval, db_interval in zip(intervals, db_intervals):
                 interval["id"] = db_interval.id
@@ -805,45 +809,49 @@ class JobAnnotation:
             self.ir_data.shapes = list(generate_shapes())
 
     def _init_tracks_from_db(self):
-        # NOTE: do not use .prefetch_related() with .values() since it's useless:
-        # https://github.com/cvat-ai/cvat/pull/7748#issuecomment-2063695007
-        db_tracks = (
-            self.db_job.labeledtrack_set.values(
+        db_tracks = [
+            dotdict(row)
+            for row in self.db_job.labeledtrack_set.values(
                 "id",
                 "frame",
                 "label_id",
                 "group",
                 "source",
                 "parent",
-                "shape__type",
-                "shape__occluded",
-                "shape__z_order",
-                "shape__rotation",
-                "shape__points",
-                "shape__id",
-                "shape__frame",
-                "shape__outside",
             )
-            .order_by("id", "shape__frame")
+            .order_by("id")
             .iterator(chunk_size=settings.DEFAULT_DB_ANNO_CHUNK_SIZE)
-        )
+        ]
 
-        db_tracks = merge_table_rows(
-            rows=db_tracks,
-            keys_for_merge={
-                "shapes": [
-                    "shape__type",
-                    "shape__occluded",
-                    "shape__z_order",
-                    "shape__points",
-                    "shape__rotation",
-                    "shape__id",
-                    "shape__frame",
-                    "shape__outside",
-                ],
-            },
-            field_id="id",
-        )
+        if not db_tracks:
+            self.ir_data.tracks = []
+            return
+
+        tracks_by_id = {db_track.id: db_track for db_track in db_tracks}
+        for db_track in db_tracks:
+            db_track.shapes = []
+
+        for track_ids_chunk in take_by(sorted(tracks_by_id), 1000):
+            db_shapes = (
+                models.TrackedShape.objects.filter(track_id__in=track_ids_chunk)
+                .values(
+                    "track_id",
+                    "type",
+                    "occluded",
+                    "z_order",
+                    "rotation",
+                    "points",
+                    "id",
+                    "frame",
+                    "outside",
+                )
+                .order_by("track_id", "frame")
+                .iterator(chunk_size=settings.DEFAULT_DB_ANNO_CHUNK_SIZE)
+            )
+
+            for db_shape in db_shapes:
+                track_id = db_shape.pop("track_id")
+                tracks_by_id[track_id].shapes.append(dotdict(db_shape))
 
         labeledtrack_attributes = _receive_attributes_from_db(
             self.db_job.labeledtrackattributeval_set,
@@ -1021,7 +1029,7 @@ class TaskAnnotation:
         ).get(id=pk)
         self._write_only = write_only
 
-        # TODO: maybe include consensus jobs except for task export
+        # TODO: maybe include replica jobs except for task export
         requested_job_types = [models.JobType.ANNOTATION]
         if self.db_task.data.validation_mode == models.ValidationMode.GT_POOL:
             requested_job_types.append(models.JobType.GROUND_TRUTH)
@@ -1303,7 +1311,7 @@ def delete_job_data(pk, *, db_job: models.Job | None = None):
     annotation.delete()
 
 
-@transaction_with_repeatable_read()
+@db_utils.transaction_with_repeatable_read()
 def export_job(
     job_id: int,
     dst_file: str,
@@ -1362,7 +1370,7 @@ def delete_task_data(pk):
     annotation.delete()
 
 
-@transaction_with_repeatable_read()
+@db_utils.transaction_with_repeatable_read()
 def export_task(
     task_id: int,
     dst_file: str,
@@ -1406,7 +1414,7 @@ def import_task_annotations(
                 import_mode=import_mode,
             )
         except (DatasetError, DatasetImportError, DatasetNotFoundError) as ex:
-            raise CvatImportError(str(ex))
+            raise CvatImportError(format_import_exception(ex))
 
 
 @transaction.atomic
@@ -1433,4 +1441,4 @@ def import_job_annotations(
                 import_mode=import_mode,
             )
         except (DatasetError, DatasetImportError, DatasetNotFoundError) as ex:
-            raise CvatImportError(str(ex))
+            raise CvatImportError(format_import_exception(ex))

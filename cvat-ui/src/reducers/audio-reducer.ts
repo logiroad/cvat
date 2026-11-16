@@ -2,10 +2,16 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { AnyAction } from 'redux';
 import { AnnotationActionTypes } from 'actions/annotation-actions';
-import { AudioActionTypes } from 'actions/audio-actions';
+import { AudioActions, AudioActionTypes } from 'actions/audio-actions';
 import { BoundariesActionTypes } from 'actions/boundaries-actions';
+import { AudioRegionsOrdering } from 'audio/components/annotation-page/audio-workspace/utils/audio-interval';
+import { limitZoom } from 'audio/utils/waveform-geometry';
+import {
+    DimensionType, LabelType,
+} from 'cvat-core-wrapper';
+import { filterApplicableForType } from 'utils/filter-applicable-labels';
+
 import { ActiveControl, AudioState } from '.';
 
 const defaultState: AudioState = {
@@ -17,45 +23,123 @@ const defaultState: AudioState = {
         zoom: 1,
         volume: 1,
         loop: false,
+        playbackRange: null,
+        playbackRangeSource: null,
+        fitIntervalRequest: null,
         intervals: [],
+        intervalsOrdering: AudioRegionsOrdering.ID_ASCENT,
         activeIntervalID: null,
         hoveredIntervalID: null,
-        audioUrl: null,
+        interactingIntervalID: null,
+        contextMenu: {
+            top: 0,
+            left: 0,
+            clientID: null,
+        },
+        audioDataToken: null,
         audioLoading: false,
         audioError: null,
         waveformReady: false,
+        audioLoadRequest: null,
+        seekRequest: null,
         activeLabelId: null,
     },
 };
 
-export default function audioReducer(state: AudioState = defaultState, action: AnyAction): AudioState {
+type AudioReducerAction =
+    | AudioActions
+    | {
+        type:
+            | BoundariesActionTypes.RESET_AFTER_ERROR
+            | AnnotationActionTypes.GET_JOB_SUCCESS
+            | AnnotationActionTypes.UPDATE_ACTIVE_CONTROL
+            | AnnotationActionTypes.FETCH_ANNOTATIONS_SUCCESS;
+        payload: any;
+    };
+
+export default function audioReducer(state: AudioState = defaultState, action: AudioReducerAction): AudioState {
     switch (action.type) {
         case BoundariesActionTypes.RESET_AFTER_ERROR:
         case AnnotationActionTypes.GET_JOB_SUCCESS: {
             const { job } = action.payload;
+            const labels = job.dimension === DimensionType.DIMENSION_1D ?
+                filterApplicableForType(LabelType.INTERVAL, job.labels) :
+                job.labels;
             return {
                 ...defaultState,
                 player: {
                     ...defaultState.player,
-                    activeLabelId: job.labels.length ? job.labels[0].id : null,
+                    activeLabelId: (labels.length ? labels[0].id : null) ?? null,
                 },
             };
         }
-        case AudioActionTypes.SWITCH_AUDIO_PLAY: {
+        case AudioActionTypes.PAUSE_AUDIO: {
             return {
                 ...state,
                 player: {
                     ...state.player,
-                    playing: action.payload.playing,
+                    playing: false,
                 },
             };
         }
-        case AudioActionTypes.SET_AUDIO_CURRENT_TIME: {
+        case AudioActionTypes.PLAY_FULL_AUDIO: {
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    playing: true,
+                    playbackRange: null,
+                    playbackRangeSource: null,
+                },
+            };
+        }
+        case AudioActionTypes.PLAY_AUDIO_RANGE: {
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    playing: true,
+                    playbackRange: action.payload.range,
+                    playbackRangeSource: null,
+                },
+            };
+        }
+        case AudioActionTypes.RESUME_AUDIO_RANGE: {
+            if (!state.player.playbackRange) return state;
+
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    playing: true,
+                },
+            };
+        }
+        case AudioActionTypes.REPORT_AUDIO_CURRENT_TIME: {
             return {
                 ...state,
                 player: {
                     ...state.player,
                     currentTime: action.payload.time,
+                },
+            };
+        }
+        case AudioActionTypes.SEEK_AUDIO: {
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    seekRequest: action.payload.request,
+                },
+            };
+        }
+        case AudioActionTypes.COMPLETE_AUDIO_SEEK: {
+            if (state.player.seekRequest !== action.payload.request) return state;
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    seekRequest: null,
                 },
             };
         }
@@ -82,7 +166,7 @@ export default function audioReducer(state: AudioState = defaultState, action: A
                 ...state,
                 player: {
                     ...state.player,
-                    zoom: action.payload.zoom,
+                    zoom: limitZoom(action.payload.zoom),
                 },
             };
         }
@@ -104,6 +188,81 @@ export default function audioReducer(state: AudioState = defaultState, action: A
                 },
             };
         }
+        case AudioActionTypes.UPDATE_AUDIO_PLAYBACK_RANGE: {
+            if (state.player.playbackRange?.id !== action.payload.range.id) {
+                return state;
+            }
+
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    playbackRange: action.payload.range,
+                },
+            };
+        }
+        case AudioActionTypes.CLEAR_AUDIO_PLAYBACK_RANGE: {
+            if (action.payload.id && state.player.playbackRange?.id !== action.payload.id) {
+                return state;
+            }
+
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    playing: false,
+                    playbackRange: null,
+                    playbackRangeSource: null,
+                },
+            };
+        }
+        case AudioActionTypes.SET_AUDIO_INTERVAL_PLAYBACK_SOURCE: {
+            if (state.player.playbackRange?.id !== action.payload.rangeID) {
+                return state;
+            }
+
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    playbackRangeSource: {
+                        rangeID: action.payload.rangeID,
+                        intervalID: action.payload.intervalID,
+                    },
+                },
+            };
+        }
+        case AudioActionTypes.CLEAR_AUDIO_INTERVAL_PLAYBACK_SOURCE: {
+            if (state.player.playbackRangeSource?.rangeID !== action.payload.rangeID) return state;
+
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    playbackRangeSource: null,
+                },
+            };
+        }
+        case AudioActionTypes.FIT_AUDIO_INTERVAL: {
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    fitIntervalRequest: action.payload.request,
+                },
+            };
+        }
+        case AudioActionTypes.COMPLETE_FIT_AUDIO_INTERVAL: {
+            if (state.player.fitIntervalRequest !== action.payload.request) return state;
+
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    fitIntervalRequest: null,
+                },
+            };
+        }
         case AudioActionTypes.SET_AUDIO_ACTIVE_INTERVAL: {
             return {
                 ...state,
@@ -122,6 +281,41 @@ export default function audioReducer(state: AudioState = defaultState, action: A
                 },
             };
         }
+        case AudioActionTypes.SET_AUDIO_INTERACTING_INTERVAL: {
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    interactingIntervalID: action.payload.clientID,
+                },
+            };
+        }
+        case AudioActionTypes.SET_AUDIO_INTERVALS_ORDERING: {
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    intervalsOrdering: action.payload.ordering,
+                },
+            };
+        }
+        case AudioActionTypes.UPDATE_AUDIO_CONTEXT_MENU: {
+            const {
+                left, top, clientID,
+            } = action.payload;
+
+            return {
+                ...state,
+                player: {
+                    ...state.player,
+                    contextMenu: {
+                        left,
+                        top,
+                        clientID,
+                    },
+                },
+            };
+        }
         case AudioActionTypes.LOAD_AUDIO_DATA: {
             return {
                 ...state,
@@ -130,37 +324,56 @@ export default function audioReducer(state: AudioState = defaultState, action: A
                     audioLoading: true,
                     audioError: null,
                     waveformReady: false,
-                    audioUrl: null,
+                    audioDataToken: null,
+                    audioLoadRequest: action.payload.request,
+                    seekRequest: null,
+                    playing: false,
+                    playbackRange: null,
+                    playbackRangeSource: null,
+                    contextMenu: defaultState.player.contextMenu,
                 },
             };
         }
         case AudioActionTypes.LOAD_AUDIO_DATA_SUCCESS: {
+            if (state.player.audioLoadRequest !== action.payload.request) return state;
             return {
                 ...state,
                 player: {
                     ...state.player,
-                    audioUrl: action.payload.audioUrl,
+                    audioDataToken: action.payload.audioDataToken,
+                    audioLoadRequest: null,
                     audioLoading: false,
                     audioError: null,
                 },
             };
         }
         case AudioActionTypes.LOAD_AUDIO_DATA_FAILED: {
+            if (state.player.audioLoadRequest !== action.payload.request) return state;
             return {
                 ...state,
                 player: {
                     ...state.player,
                     audioLoading: false,
                     audioError: action.payload.error,
+                    audioLoadRequest: null,
                 },
             };
         }
         case AudioActionTypes.SET_WAVEFORM_READY: {
+            if (state.player.audioDataToken !== action.payload.sourceToken) return state;
             return {
                 ...state,
                 player: {
                     ...state.player,
                     waveformReady: action.payload.ready,
+                    ...(action.payload.ready ? {} : {
+                        audioDataToken: null,
+                        playing: false,
+                        playbackRange: null,
+                        playbackRangeSource: null,
+                        currentTime: 0,
+                        duration: 0,
+                    }),
                 },
             };
         }
@@ -188,6 +401,13 @@ export default function audioReducer(state: AudioState = defaultState, action: A
                     ...state.player,
                     activeIntervalID: null,
                     hoveredIntervalID: null,
+                    interactingIntervalID: null,
+                    // A range cannot remain valid when entering create/record mode,
+                    // but full-track playback can continue while drawing.
+                    playing: state.player.playbackRange ? false : state.player.playing,
+                    playbackRange: null,
+                    playbackRangeSource: null,
+                    contextMenu: defaultState.player.contextMenu,
                 },
             };
         }
@@ -199,7 +419,14 @@ export default function audioReducer(state: AudioState = defaultState, action: A
                 (interval) => interval.clientID === state.player.hoveredIntervalID,
             ) ?
                 state.player.hoveredIntervalID : null;
-
+            const interactingIntervalID = intervals.some(
+                (interval) => interval.clientID === state.player.interactingIntervalID,
+            ) ?
+                state.player.interactingIntervalID : null;
+            const contextMenuClientID = intervals.some(
+                (interval) => interval.clientID === state.player.contextMenu.clientID,
+            ) ?
+                state.player.contextMenu.clientID : null;
             return {
                 ...state,
                 player: {
@@ -207,6 +434,11 @@ export default function audioReducer(state: AudioState = defaultState, action: A
                     intervals,
                     activeIntervalID,
                     hoveredIntervalID,
+                    interactingIntervalID,
+                    contextMenu: {
+                        ...state.player.contextMenu,
+                        clientID: contextMenuClientID,
+                    },
                 },
             };
         }

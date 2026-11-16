@@ -36,6 +36,7 @@ from .agent_driver import (
     worker_current_function,
 )
 from .agent_driver_detection import AgentDetectionFunctionDriver
+from .agent_driver_interaction import AgentInteractionFunctionDriver
 from .agent_driver_tracking import AgentTrackingFunctionDriver, TrackingStateIdGenerator
 from .common import CriticalError, FunctionLoader
 
@@ -226,6 +227,9 @@ def _parse_event_stream(
 def get_function_driver_class(function_spec: object) -> type[AgentFunctionDriver]:
     if isinstance(function_spec, cvataa.DetectionFunctionSpec):
         return AgentDetectionFunctionDriver
+
+    if isinstance(function_spec, cvataa.InteractionFunctionSpec):
+        return AgentInteractionFunctionDriver
 
     if isinstance(function_spec, cvataa.TrackingFunctionSpec):
         return AgentTrackingFunctionDriver
@@ -648,6 +652,11 @@ def run_agent(
         ) as executor,
         tempfile.TemporaryDirectory() as cache_dir,
     ):
+        dh = client.api_client.default_headers
+        assert dh["User-Agent"].startswith("cvat_cli/")
+        assert " " in dh["User-Agent"]
+        dh["User-Agent"] = dh["User-Agent"].replace(" ", " (agent) ", 1)
+
         client.config.cache_dir = Path(cache_dir, "cache")
         client.logger.info("Will store cache at %s", client.config.cache_dir)
 

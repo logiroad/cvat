@@ -100,9 +100,6 @@ class InvitationPermission(OpenPolicyAgentPermission):
                 "list": Scopes.LIST,
                 "create": Scopes.CREATE,
                 "destroy": Scopes.DELETE,
-                "partial_update": (
-                    Scopes.ACCEPT if "accepted" in request.query_params else Scopes.RESEND
-                ),
                 "retrieve": Scopes.VIEW,
                 "accept": Scopes.ACCEPT,
                 "decline": Scopes.DECLINE,
@@ -124,7 +121,7 @@ class InvitationPermission(OpenPolicyAgentPermission):
                 "owner": {"id": self.user_id},
                 "invitee": {"id": None},  # unknown yet
                 "role": self.role,
-                "organization": {"id": self.org_id} if self.org_id is not None else None,
+                "organization": self.make_id_dict(self.org_id),
             }
 
         return data
@@ -143,7 +140,7 @@ class MembershipPermission(OpenPolicyAgentPermission):
         permissions = []
         for scope in cls.get_scopes(request, view, obj):
             params = {}
-            if scope == "change:role":
+            if scope == cls.Scopes.UPDATE_ROLE:
                 params["role"] = request.data.get("role")
 
             self = cls.create_base_perm(request, view, scope, iam_context, obj, **params)
@@ -185,6 +182,7 @@ class MembershipPermission(OpenPolicyAgentPermission):
         if self.obj:
             return {
                 "role": self.obj.role,
+                "new_role": getattr(self, "role", None),
                 "is_active": self.obj.is_active,
                 "user": {"id": self.obj.user_id},
                 "organization": {"id": self.obj.organization_id},

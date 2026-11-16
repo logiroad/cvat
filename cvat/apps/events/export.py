@@ -8,7 +8,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import clickhouse_connect
-from dateutil import parser
 from django.conf import settings
 from rest_framework import serializers, status
 from rest_framework.response import Response
@@ -130,8 +129,10 @@ class EventsExporter(BaseResourceExporter):
         for datetime_filter in datetime_filters:
             if query_params[datetime_filter]:
                 try:
-                    query_params[datetime_filter] = parser.isoparse(query_params[datetime_filter])
-                except parser.ParserError:
+                    query_params[datetime_filter] = datetime.fromisoformat(
+                        query_params[datetime_filter]
+                    )
+                except ValueError:
                     raise serializers.ValidationError(
                         f"Cannot parse {datetime_filter!r} datetime parameter: {query_params[datetime_filter]}"
                     )
@@ -224,6 +225,7 @@ def export(request: ExtendedRequest):
     # request validation is missed here since exporting to a cloud_storage is disabled
     manager._set_default_callback_params()
     manager.init_callback_with_params()
+    manager.init_job_callbacks()
     manager.setup_new_job(queue, request_id)
 
     response = Response(data=response_data, status=status.HTTP_202_ACCEPTED)
