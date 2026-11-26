@@ -1,5 +1,6 @@
 
 # Change log
+- 26/11/2026: IA-1076: possibility to have map view
 - 04/11/2026: IA-1058, arrow keys no longer move a focused frame slider, which skipped frames
 - 17/09/2026: IA-1016, deletion of a job, task or project is refused when at least one job is not in the "new" state
 - 21/07/2026: IA-962, possibility to show only contour

@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 import concurrent.futures
+import dataclasses
 import fnmatch
 import itertools
 import os
@@ -32,6 +33,7 @@ from cvat.apps.engine.media_extractors import (
     MEDIA_TYPES,
     AudioReader,
     CachingMediaIterator,
+    IImageReader,
     ImageListReader,
     IMediaReader,
     Mpeg4ChunkWriter,
@@ -1452,6 +1454,10 @@ def _collect_image_dataset_descriptors(
         if not image_size:
             image_size = extractor.get_image_size(frame_id)
 
+        gps_fields = {}
+        if isinstance(extractor, IImageReader) and (gps := extractor.get_image_gps(frame_id)):
+            gps_fields = dataclasses.asdict(gps)
+
         images.append(
             models.Image(
                 data=db_data,
@@ -1459,6 +1465,7 @@ def _collect_image_dataset_descriptors(
                 frame=frame_id,
                 width=image_size[0],
                 height=image_size[1],
+                **gps_fields,
             )
         )
 

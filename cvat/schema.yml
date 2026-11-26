@@ -9234,6 +9234,21 @@ components:
           maxLength: 1024
         related_files:
           type: integer
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        altitude:
+          type: number
+          format: double
+          nullable: true
+        direction:
+          type: number
+          format: double
+          nullable: true
+          description: Image direction in degrees, [0; 360)
         has_related_context:
           type: boolean
           readOnly: true
