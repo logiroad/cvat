@@ -385,6 +385,10 @@ export interface SerializedFramesMetaData {
         height?: number;
         name: string;
         related_files: number;
+        latitude?: number;
+        longitude?: number;
+        altitude?: number | null;
+        direction?: number | null;
     }[];
     image_quality: number;
     size: number;

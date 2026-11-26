@@ -678,6 +678,21 @@ class ProjectViewSet(
 _PREFER_HANDLING_EMPTY = "handling=empty"
 
 
+def serialize_media_item_gps(item: Any) -> dict[str, Any]:
+    # Videos and placeholder frames don't have GPS info
+    latitude = getattr(item, "latitude", None)
+    longitude = getattr(item, "longitude", None)
+    if latitude is None or longitude is None:
+        return {}
+
+    return {
+        "latitude": latitude,
+        "longitude": longitude,
+        "altitude": getattr(item, "altitude", None),
+        "direction": getattr(item, "direction", None),
+    }
+
+
 def _wants_empty_preview(request: ExtendedRequest) -> bool:
     """Return True if the request opts in to 204-on-empty via ``Prefer: handling=empty``."""
     for token in request.headers.get("Prefer", "").split(","):
@@ -2025,6 +2040,7 @@ class TaskViewSet(
                 return {
                     "width": item.width,
                     "height": item.height,
+                    **serialize_media_item_gps(item),
                 }
 
         elif db_task.media_type:
@@ -2851,6 +2867,7 @@ class JobViewSet(
                 return {
                     "width": item.width,
                     "height": item.height,
+                    **serialize_media_item_gps(item),
                 }
 
         elif db_task.media_type:

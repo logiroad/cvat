@@ -1885,6 +1885,10 @@ class JobValidationLayoutWriteSerializer(serializers.Serializer):
             db_segment_frame.path = db_requested_frame.path
             db_segment_frame.width = db_requested_frame.width
             db_segment_frame.height = db_requested_frame.height
+            db_segment_frame.latitude = db_requested_frame.latitude
+            db_segment_frame.longitude = db_requested_frame.longitude
+            db_segment_frame.altitude = db_requested_frame.altitude
+            db_segment_frame.direction = db_requested_frame.direction
 
             updated_honeypots[frame] = db_segment_frame
 
@@ -1894,7 +1898,8 @@ class JobValidationLayoutWriteSerializer(serializers.Serializer):
             else:
                 # Update image infos
                 models.Image.objects.bulk_update(
-                    updated_honeypots.values(), fields=["path", "width", "height", "real_frame"]
+                    updated_honeypots.values(),
+                    fields=["path", "width", "height", "real_frame", *HONEYPOT_GPS_FIELDS],
                 )
 
                 models.RelatedFile.images.through.objects.filter(
@@ -2353,7 +2358,7 @@ class TaskValidationLayoutWriteSerializer(serializers.Serializer):
             models.Image,
             list(bulk_context.updated_honeypots.values()),
             update_conflicts=True,
-            update_fields=["path", "width", "height", "real_frame"],
+            update_fields=["path", "width", "height", "real_frame", *HONEYPOT_GPS_FIELDS],
             unique_fields=[
                 # required for Postgres
                 # https://docs.djangoproject.com/en/4.2/ref/models/querysets/#bulk-create
@@ -3873,11 +3878,22 @@ class AboutSerializer(serializers.Serializer):
     subtitle = serializers.CharField(max_length=1024)
 
 
+HONEYPOT_GPS_FIELDS = ("latitude", "longitude", "altitude", "direction")
+
+
 class FrameMetaSerializer(serializers.Serializer):
     width = serializers.IntegerField(required=False)
     height = serializers.IntegerField(required=False)
     name = serializers.CharField(max_length=MAX_FILENAME_LENGTH)
     related_files = serializers.IntegerField()
+
+    # GPS position from the image EXIF data. Present only for images with GPS info
+    latitude = serializers.FloatField(required=False)
+    longitude = serializers.FloatField(required=False)
+    altitude = serializers.FloatField(required=False, allow_null=True)
+    direction = serializers.FloatField(
+        required=False, allow_null=True, help_text="Image direction in degrees, [0; 360)"
+    )
 
     # for compatibility with version 2.3.0
     has_related_context = serializers.SerializerMethodField()

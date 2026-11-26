@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import itertools
+import math
 import os
 import shutil
 import stat
@@ -47,6 +48,16 @@ from utils.dataset_manifest.utils import MediaDimension as _MediaDimension
 from utils.dataset_manifest.utils import MemOpenable, Openable, PcdReader, detect_media_dimension
 
 ORIENTATION_EXIF_TAG = 274
+
+GPS_IFD_EXIF_TAG = 0x8825
+GPS_LATITUDE_REF_TAG = 1
+GPS_LATITUDE_TAG = 2
+GPS_LONGITUDE_REF_TAG = 3
+GPS_LONGITUDE_TAG = 4
+GPS_ALTITUDE_REF_TAG = 5
+GPS_ALTITUDE_TAG = 6
+GPS_TRACK_TAG = 15
+GPS_IMG_DIRECTION_TAG = 17
 
 
 class Chapter(TypedDict):
@@ -119,6 +130,109 @@ def has_exif_rotation(img: Image.Image) -> bool:
         img.getexif().get(ORIENTATION_EXIF_TAG, ORIENTATION.NORMAL_HORIZONTAL)
         != ORIENTATION.NORMAL_HORIZONTAL
     )
+
+
+@dataclass(frozen=True)
+class GpsInfo:
+    latitude: float
+    longitude: float
+    altitude: float | None = None
+    direction: float | None = None
+    "Image direction (or, if missing, direction of movement) in degrees, [0; 360)"
+
+
+def _exif_rational_to_float(value) -> float:
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        # legacy (numerator, denominator) representation
+        numerator, denominator = value
+        return float(numerator) / float(denominator)
+
+    return float(value)
+
+
+def _exif_dms_to_degrees(value) -> float:
+    if isinstance(value, (tuple, list)):
+        if len(value) == 3:
+            degrees, minutes, seconds = map(_exif_rational_to_float, value)
+            return degrees + minutes / 60 + seconds / 3600
+        elif len(value) == 1:
+            return _exif_rational_to_float(value[0])
+
+    return _exif_rational_to_float(value)
+
+
+def _exif_ref(value) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("ascii", errors="ignore")
+
+    return str(value or "").strip("\x00 ").upper()
+
+
+def _finite_or_none(value: float | None) -> float | None:
+    if value is None or not math.isfinite(value):
+        return None
+    return value
+
+
+def extract_gps_from_image(img: Image.Image) -> GpsInfo | None:
+    """
+    Reads GPS coordinates from the image EXIF GPS IFD.
+    Returns None if the image has no usable GPS information.
+    """
+
+    try:
+        gps = img.getexif().get_ifd(GPS_IFD_EXIF_TAG)
+    except Exception:  # broken EXIF data must not break task creation
+        return None
+
+    if not gps:
+        return None
+
+    try:
+        latitude = _exif_dms_to_degrees(gps[GPS_LATITUDE_TAG])
+        longitude = _exif_dms_to_degrees(gps[GPS_LONGITUDE_TAG])
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+
+    if _exif_ref(gps.get(GPS_LATITUDE_REF_TAG)) == "S":
+        latitude = -abs(latitude)
+    if _exif_ref(gps.get(GPS_LONGITUDE_REF_TAG)) == "W":
+        longitude = -abs(longitude)
+
+    if not (math.isfinite(latitude) and math.isfinite(longitude)):
+        return None
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return None
+    if latitude == 0 and longitude == 0:
+        # Many cameras write zeros when there is no GPS fix
+        return None
+
+    altitude = None
+    if GPS_ALTITUDE_TAG in gps:
+        try:
+            altitude = _finite_or_none(_exif_rational_to_float(gps[GPS_ALTITUDE_TAG]))
+        except (TypeError, ValueError, ZeroDivisionError):
+            altitude = None
+
+        altitude_ref = gps.get(GPS_ALTITUDE_REF_TAG)
+        if isinstance(altitude_ref, bytes):
+            altitude_ref = altitude_ref[0] if altitude_ref else 0
+        if altitude is not None and altitude_ref == 1:  # below sea level
+            altitude = -altitude
+
+    direction = None
+    for direction_tag in (GPS_IMG_DIRECTION_TAG, GPS_TRACK_TAG):
+        if direction_tag in gps:
+            try:
+                direction = _finite_or_none(_exif_rational_to_float(gps[direction_tag]))
+            except (TypeError, ValueError, ZeroDivisionError):
+                direction = None
+
+            if direction is not None:
+                direction %= 360
+                break
+
+    return GpsInfo(latitude=latitude, longitude=longitude, altitude=altitude, direction=direction)
 
 
 def load_image(image: tuple[str, str]) -> tuple[Image.Image, str]:
@@ -292,6 +406,10 @@ class IImageReader(IMediaReader):
     def get_image_size(self, i) -> tuple[int, int]:
         pass
 
+    def get_image_gps(self, i) -> GpsInfo | None:
+        "Returns GPS info from the image EXIF data, if available"
+        return None
+
 
 class ImageListReader(IImageReader):
     def __init__(
@@ -356,6 +474,18 @@ class ImageListReader(IImageReader):
         else:
             with Image.open(self._source_paths[i]) as img:
                 return image_size_within_orientation(img)
+
+    def get_image_gps(self, i) -> GpsInfo | None:
+        if self._dimension != DimensionType.DIM_2D:
+            return None
+
+        try:
+            # get_image() is overridden in the archive-based readers
+            with Image.open(self.get_image(i)) as img:
+                return extract_gps_from_image(img)
+        except (OSError, ValueError):
+            # GPS is optional: missing (e.g. cloud data) or unreadable files are skipped
+            return None
 
     def reconcile(
         self, source_paths, step=1, start=0, stop=None, dimension=None, sorting_method=None

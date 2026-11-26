@@ -739,6 +739,13 @@ class Image(models.Model):
     height = models.PositiveIntegerField()
     is_placeholder = models.BooleanField(default=False)
     real_frame = models.PositiveIntegerField(default=0)
+
+    # GPS position from the image EXIF data, if available
+    latitude = models.FloatField(null=True, blank=True, default=None)
+    longitude = models.FloatField(null=True, blank=True, default=None)
+    altitude = models.FloatField(null=True, blank=True, default=None)
+    direction = models.FloatField(null=True, blank=True, default=None)
+
     related_files: models.manager.RelatedManager[RelatedFile]
 
     class Meta:

@@ -1,0 +1,105 @@
+// Copyright (C) CVAT.ai Corporation
+//
+// SPDX-License-Identifier: MIT
+
+@import 'base';
+
+.cvat-gps-map-panel {
+    position: fixed;
+    top: 56px;
+    right: 16px;
+    width: 420px;
+    height: 320px;
+    min-width: 240px;
+    min-height: 180px;
+    max-width: calc(100vw - 32px);
+    max-height: calc(100vh - 72px);
+    z-index: 999;
+    isolation: isolate;
+    display: flex;
+    flex-direction: column;
+    background: $background-color-1;
+    border-radius: 4px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+
+    // the panel is resized from its bottom-left corner since it is attached to the right side
+    resize: both;
+    overflow: hidden;
+    direction: rtl;
+
+    > * {
+        direction: ltr;
+    }
+}
+
+.cvat-gps-map-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 4px 4px 8px;
+    border-bottom: 1px solid $border-color-1;
+}
+
+.cvat-gps-map-panel-coordinates {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+.cvat-gps-map-panel-map {
+    flex: 1;
+    min-height: 0;
+}
+
+.cvat-gps-map-panel-view-switch {
+    flex-shrink: 0;
+}
+
+.cvat-gps-map-panel-street-view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    iframe {
+        width: 100%;
+        height: 100%;
+        border: 0;
+    }
+}
+
+.cvat-gps-map-current-marker {
+    position: relative;
+
+    .cvat-gps-map-current-dot {
+        position: absolute;
+        top: 11px;
+        left: 11px;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #ff3b30;
+        border: 2px solid #fff;
+        box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+    }
+
+    .cvat-gps-map-direction {
+        position: absolute;
+        inset: 0;
+
+        &::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 12px;
+            border-left: 6px solid transparent;
+            border-right: 6px solid transparent;
+            border-bottom: 14px solid #ff3b30;
+            filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
+        }
+    }
+}
